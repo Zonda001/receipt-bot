@@ -1,0 +1,10 @@
+# секрети: ніколи в git
+.env
+*.json
+!.env.example
+
+.venv/
+__pycache__/
+*.pyc
+data/
+*.log
