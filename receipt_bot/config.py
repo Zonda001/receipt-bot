@@ -10,10 +10,11 @@ class Settings(BaseSettings):
     bot_token: SecretStr
 
     google_sa_key_file: str
-    google_oauth_client_id: str
-    google_oauth_client_secret: SecretStr
+    google_oauth_client_file: str
     sheet_id: str
-    drive_folder_id: str
+
+    drive_upload_url: SecretStr
+    drive_upload_secret: SecretStr
 
     llm_base_url: str
     llm_model: str
