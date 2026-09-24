@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr
     # Groq/OpenAI приймають "none" (без міркувань, швидше); порожньо — параметр не надсилається.
     llm_reasoning_effort: str = "none"
+    # Стеля розпізнавань на добу на всю команду (Groq free: ~200K токенів/добу, ~1.5-2K на чек).
+    daily_recognitions: int = 100
 
     db_path: str = "data/bot.db"
 

@@ -48,11 +48,6 @@ def test_total_first_and_labelled_from_candidates():
     assert [c.amount for c in rec.candidates] == [Decimal("347.50"), Decimal("362.70")]
 
 
-def test_total_missing_from_candidates_is_still_first():
-    rec = normalize(answer(total=50, candidates=[("СУМА", 60)]))
-    assert rec.total == Decimal("50.00") and len(rec.candidates) == 2
-
-
 def test_vat_change_cash_are_never_candidates():
     rec = normalize(answer(total=347.5, candidates=[("ПДВ 20%", 57.92), ("РЕШТА", 52.5), ("ГОТІВКА", 400)]))
     assert [c.amount for c in rec.candidates] == [Decimal("347.50")]
@@ -85,3 +80,51 @@ def test_prepare_image_downscales_and_converts():
 def test_prepare_image_rejects_garbage():
     with pytest.raises(NotAnImage):
         prepare_image(b"definitely not an image")
+
+
+def test_vat_reported_as_total_is_not_preselected():
+    rec = normalize(answer(total=57.92, candidates=[("ПДВ 20%", 57.92), ("ДО СПЛАТИ", 347.5)]))
+    assert not rec.has_total and rec.total is None
+    assert [c.amount for c in rec.candidates] == [Decimal("347.50")]
+
+
+def test_cash_equal_to_total_keeps_total():
+    rec = normalize(answer(total=400, candidates=[("ГОТІВКА", 400), ("ДО СПЛАТИ", 400)]))
+    assert rec.has_total and rec.total == Decimal("400.00") and rec.candidates[0].label == "ДО СПЛАТИ"
+
+
+def test_total_not_among_candidates_is_offered_but_not_trusted():
+    rec = normalize(answer(total=50, candidates=[("СУМА", 60)]))
+    assert not rec.has_total and [c.amount for c in rec.candidates] == [Decimal("50.00"), Decimal("60.00")]
+
+
+@pytest.mark.parametrize("label", ["БЕЗГОТІВКОВА", "Безготівкова оплата", "ВСЬОГО З ПДВ", "Сума з ПДВ"])
+def test_card_payment_and_gross_totals_are_kept(label):
+    rec = normalize(answer(total=None, candidates=[(label, 347.5)]))
+    assert [c.amount for c in rec.candidates] == [Decimal("347.50")]
+
+
+@pytest.mark.parametrize("label", ["ПДВ 20%", "У Т.Ч. ПДВ", "в т.ч. ПДВ А 20%", "Сума без ПДВ", "VAT 20%", "РЕШТА", "ГОТІВКА"])
+def test_vat_cash_change_labels_are_dropped(label):
+    assert normalize(answer(total=None, candidates=[(label, 57.92)])).candidates == []
+
+
+def test_to_amount_rechecks_after_rounding():
+    assert to_amount(0.004) is None
+    assert to_amount(9999999.999) is None
+    assert to_amount(1e30) is None
+
+
+@pytest.mark.parametrize("fmt_name", ["BMP", "GIF", "TIFF"])
+def test_prepare_image_rejects_unsupported_formats(fmt_name):
+    buf = io.BytesIO()
+    Image.new("RGB", (10, 10)).save(buf, fmt_name)
+    with pytest.raises(NotAnImage):
+        prepare_image(buf.getvalue())
+
+
+def test_prepare_image_rejects_truncated_jpeg():
+    buf = io.BytesIO()
+    Image.new("RGB", (800, 600), (200, 200, 200)).save(buf, "JPEG")
+    with pytest.raises(NotAnImage):
+        prepare_image(buf.getvalue()[:300])
