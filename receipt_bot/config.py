@@ -13,8 +13,8 @@ class Settings(BaseSettings):
     google_oauth_client_file: str
     sheet_id: str
 
-    drive_upload_url: SecretStr
-    drive_upload_secret: SecretStr
+    google_owner_token_file: str
+    drive_folder_id: str
 
     llm_base_url: str
     llm_model: str
