@@ -14,7 +14,7 @@ from decimal import Decimal
 
 import aiohttp
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandStart
 from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
@@ -38,11 +38,12 @@ HELP_TEXT = (
     "Я записую чеки команди.\n"
     "Надішли фото чека — я знайду суму і попрошу її підтвердити."
 )
+MANUAL_HINT = "Натисни «✏️ Ввести вручну» нижче."
 
 
 class ReceiptAction(CallbackData, prefix="r"):
     rid: str
-    action: str  # ok | manual | cancel
+    action: str  # ok | manual | back | cancel
     idx: int = 0
 
 
@@ -56,6 +57,9 @@ class Pending:
     file_id: str
     recognition: Recognition
     created: float
+    chat_id: int
+    msg_id: int         # повідомлення бота з кнопками цього чека (воно цитує фото)
+    note: str = ""      # чому розпізнати не вдалося (тоді лишається тільки ручне введення)
     status: str = "pending"  # pending -> processing -> done | cancelled
 
 
@@ -118,16 +122,24 @@ class DailyQuota:
         self._used += 1
         return True
 
+    def give_back(self) -> None:
+        """Повернути одиницю, якщо запит до моделі так і не дійшов (битий файл, 429)."""
+        if date.today() == self._day and self._used > 0:
+            self._used -= 1
+
+
+def currency_name(currency: str) -> str:
+    return "грн" if currency == "UAH" else currency
+
 
 def fmt(amount: Decimal, currency: str = "UAH") -> str:
-    text = f"{amount:,.2f}".replace(",", " ")
-    return f"{text} грн" if currency == "UAH" else f"{text} {currency}"
+    return f"{amount:,.2f}".replace(",", " ") + " " + currency_name(currency)
 
 
 def result_view(rid: str, rec: Recognition, note: str = "") -> tuple[str, InlineKeyboardMarkup]:
     kb = InlineKeyboardBuilder()
     if note:
-        text = note
+        text = f"{note}\n{MANUAL_HINT}"
         others = []
     elif rec.has_total:
         text = f"Сума: {fmt(rec.total, rec.currency)}\nПідтвердити?"
@@ -140,11 +152,12 @@ def result_view(rid: str, rec: Recognition, note: str = "") -> tuple[str, Inline
         text = "Не впевнений, яка сума підсумкова. Обери:"
         others = list(enumerate(rec.candidates))
     else:
-        text = "Не знайшов суму на чеку. Введи її вручну або надішли чіткіше фото."
+        text = f"Не знайшов суму на чеку. {MANUAL_HINT} Або надішли чіткіше фото."
         others = []
 
     for idx, c in others:
-        kb.button(text=f"{c.label}: {fmt(c.amount, rec.currency)}",
+        # Спершу сума, потім мітка з чека: якщо Telegram обріже довгу кнопку, обріжеться мітка, а не число.
+        kb.button(text=f"{fmt(c.amount, rec.currency)} — {c.label}",
                   callback_data=ReceiptAction(rid=rid, action="ok", idx=idx))
     kb.button(text="✏️ Ввести вручну", callback_data=ReceiptAction(rid=rid, action="manual"))
     kb.button(text="✖️ Скасувати", callback_data=ReceiptAction(rid=rid, action="cancel"))
@@ -152,34 +165,56 @@ def result_view(rid: str, rec: Recognition, note: str = "") -> tuple[str, Inline
     return text, kb.as_markup()
 
 
+def manual_view(rid: str, rec: Recognition) -> tuple[str, InlineKeyboardMarkup]:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="↩️ Назад", callback_data=ReceiptAction(rid=rid, action="back"))
+    kb.button(text="✖️ Скасувати", callback_data=ReceiptAction(rid=rid, action="cancel"))
+    kb.adjust(2)
+    return (f"Введи суму для цього чека числом ({currency_name(rec.currency)}), наприклад 123.45",
+            kb.as_markup())
+
+
 def is_allowed(user_id: int, allowed_ids: set[int]) -> bool:
     # Тимчасово, до Google-авторизації: бот публічний, тож без списку будь-хто спалює квоту моделі.
     return user_id in allowed_ids
 
 
-async def drop_keyboard(query: CallbackQuery) -> None:
-    """Прибрати кнопки. Косметика: старе/недоступне повідомлення не повинно ламати сценарій."""
-    if isinstance(query.message, Message):
-        with suppress(TelegramBadRequest):
-            await query.message.edit_reply_markup(reply_markup=None)
+async def edit_receipt(bot: Bot, item: Pending, text: str, markup: InlineKeyboardMarkup | None = None) -> None:
+    """Оновити повідомлення чека. Косметика: збій Telegram не повинен ламати сценарій."""
+    with suppress(TelegramAPIError):
+        await bot.edit_message_text(text=text, chat_id=item.chat_id, message_id=item.msg_id, reply_markup=markup)
+
+
+async def release_manual(bot: Bot, state: FSMContext, pending: PendingStore, keep_rid: str | None = None) -> None:
+    """Скинути очікування ручної суми. Якщо чекали суму для іншого чека — повернути йому кнопки.
+
+    Ручне введення одне на користувача: без цього сума, набрана для чека A, могла б піти в чек B.
+    """
+    rid = (await state.get_data()).get("rid")
+    await state.clear()
+    if not rid or rid == keep_rid:
+        return
+    item = pending.get(rid)
+    if item is not None and item.status == "pending":
+        await edit_receipt(bot, item, *result_view(rid, item.recognition, item.note))
 
 
 @router.message(CommandStart())
 @router.message(Command("help"))
-async def on_start(message: Message, state: FSMContext) -> None:
-    await state.clear()
+async def on_start(message: Message, bot: Bot, state: FSMContext, pending: PendingStore) -> None:
+    await release_manual(bot, state, pending)
     await message.answer(HELP_TEXT)
 
 
 @router.message(F.photo | F.document)
 async def on_photo(message: Message, bot: Bot, state: FSMContext, recognizer: Recognizer,
                    pending: PendingStore, limiter: RateLimiter, quota: DailyQuota, allowed_ids: set[int]) -> None:
-    await state.clear()
     user_id = message.from_user.id
     if not is_allowed(user_id, allowed_ids):
         log.info("rejected user %s (not in allowlist)", user_id)
         await message.answer(f"Бот поки в розробці. Твій Telegram ID: {user_id} — передай його адміністратору.")
         return
+    await release_manual(bot, state, pending)
 
     if message.document:
         mime = message.document.mime_type or ""
@@ -215,15 +250,17 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, recognizer: Re
         if quota.take():
             rec = await recognizer.recognize(image.read())
         else:
-            note = "Ліміт автоматичного розпізнавання на сьогодні вичерпано. Можеш ввести суму вручну."
+            note = "Ліміт автоматичного розпізнавання на сьогодні вичерпано — суму можна ввести вручну."
     except NotAnImage:
+        quota.give_back()  # до моделі запит не дійшов
         await status.edit_text(
             "Не вдалося відкрити зображення (пошкоджене, завелике або формат не підтримується). "
             "Надішли чек як звичайне фото, не файлом.")
         return
     except RateLimited as e:
+        quota.give_back()
         log.warning("rate limited, retry after %.0fs", e.retry_after)
-        note = "Розпізнавання зараз перевантажене. Спробуй надіслати фото за хвилину або введи суму вручну."
+        note = "Розпізнавання зараз перевантажене. Надішли фото ще раз за хвилину або введи суму вручну."
     except RecognitionError as e:
         log.warning("recognition failed: %s", e)
         note = "Не вдалося розпізнати чек. Спробуй ще раз пізніше або введи суму вручну."
@@ -237,73 +274,95 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, recognizer: Re
         await status.edit_text("Це не схоже на чек. Надішли фото чека.")
         return
 
-    rid = pending.add(Pending(user_id=user_id, file_id=file.file_id, recognition=rec, created=time.time()))
-    text, markup = result_view(rid, rec, note=note)
-    await status.edit_text(text, reply_markup=markup)
+    item = Pending(user_id=user_id, file_id=file.file_id, recognition=rec, created=time.time(),
+                   chat_id=status.chat.id, msg_id=status.message_id, note=note)
+    rid = pending.add(item)
+    await edit_receipt(bot, item, *result_view(rid, rec, note))
 
 
 async def finalize(message: Message, item: Pending, amount: Decimal, manual: bool) -> None:
-    """Викликати тільки після item.status = "processing" (ставиться до першого await у хендлері)."""
+    """Викликати тільки після item.status = "processing" (ставиться до першого await у хендлері).
+
+    Між зміною статусу і цим викликом не повинно бути нічого, що може кинути виняток,
+    інакше чек назавжди лишиться в "processing".
+    """
     # Наступний етап: тут перевірка доступу -> Drive -> Sheets; при збої статус повернеться в "pending".
     item.status = "done"
     note = " (введено вручну)" if manual else ""
     with suppress(TelegramAPIError):
+        # Відповіддю на повідомлення саме цього чека: видно, яку суму до якого фото підтверджено.
         await message.answer(
             f"✅ Підтверджено: {fmt(amount, item.recognition.currency)}{note}\n"
-            "Запис у Google Drive і Sheets додамо на наступному етапі — зараз нічого не збережено."
+            "Запис у Google Drive і Sheets додамо на наступному етапі — зараз нічого не збережено.",
+            reply_parameters=ReplyParameters(message_id=item.msg_id, allow_sending_without_reply=True),
         )
 
 
 @router.callback_query(ReceiptAction.filter())
-async def on_action(query: CallbackQuery, callback_data: ReceiptAction, state: FSMContext,
+async def on_action(query: CallbackQuery, callback_data: ReceiptAction, bot: Bot, state: FSMContext,
                     pending: PendingStore) -> None:
-    item = pending.get(callback_data.rid)
+    rid = callback_data.rid
+    item = pending.get(rid)
     if item is None:
-        await query.answer("Чек застарів — надішли фото ще раз.", show_alert=True)
-        await drop_keyboard(query)
+        with suppress(TelegramAPIError):
+            await query.answer("Чек застарів — надішли фото ще раз.", show_alert=True)
+            if isinstance(query.message, Message):
+                await query.message.edit_reply_markup(reply_markup=None)
         return
     if item.user_id != query.from_user.id:
-        await query.answer("Це не твій чек.", show_alert=True)
-        return
-    if item.status == "processing":
-        await query.answer("Вже обробляю…")
+        with suppress(TelegramAPIError):
+            await query.answer("Це не твій чек.", show_alert=True)
         return
     if item.status != "pending":
-        await query.answer("Цей чек уже оброблено.")
+        with suppress(TelegramAPIError):
+            await query.answer("Вже обробляю…" if item.status == "processing" else "Цей чек уже оброблено.")
         return
 
     if callback_data.action == "ok":
         if not 0 <= callback_data.idx < len(item.recognition.candidates):
-            await query.answer("Невідома сума.", show_alert=True)
+            with suppress(TelegramAPIError):
+                await query.answer("Невідома сума.", show_alert=True)
             return
         amount = item.recognition.candidates[callback_data.idx].amount
         item.status = "processing"  # одразу, до першого await: aiogram обробляє натискання паралельно
-        await query.answer()
-        if (await state.get_data()).get("rid") == callback_data.rid:
-            await state.clear()  # якщо до цього натискали "ввести вручну" для цього ж чека
-        await drop_keyboard(query)
-        await finalize(query.message, item, amount, manual=False)
-    elif callback_data.action == "manual":
-        await state.set_state(ManualAmount.waiting)
-        await state.update_data(rid=callback_data.rid)
-        await query.answer()
+        if (await state.get_data()).get("rid") == rid:
+            await state.clear()  # сума обрана кнопкою — ручне введення для цього чека вже не чекаємо
+        with suppress(TelegramAPIError):
+            await query.answer()
+        await edit_receipt(bot, item, f"Сума: {fmt(amount, item.recognition.currency)}")
         if isinstance(query.message, Message):
-            with suppress(TelegramBadRequest):
-                # Редагуємо саме це повідомлення: воно цитує фото, тож видно, для якого чека сума.
-                await query.message.edit_text("Введи суму для цього чека числом, наприклад 123.45")
+            await finalize(query.message, item, amount, manual=False)
+        else:
+            item.status = "done"
+    elif callback_data.action == "manual":
+        await release_manual(bot, state, pending, keep_rid=rid)
+        await state.set_state(ManualAmount.waiting)
+        await state.update_data(rid=rid)
+        with suppress(TelegramAPIError):
+            await query.answer()
+        await edit_receipt(bot, item, *manual_view(rid, item.recognition))
+    elif callback_data.action == "back":
+        if (await state.get_data()).get("rid") == rid:
+            await state.clear()
+        with suppress(TelegramAPIError):
+            await query.answer()
+        await edit_receipt(bot, item, *result_view(rid, item.recognition, item.note))
     elif callback_data.action == "cancel":
         item.status = "cancelled"
-        await query.answer("Скасовано")
-        if isinstance(query.message, Message):
-            with suppress(TelegramBadRequest):
-                await query.message.edit_text("Скасовано. Нічого не записано.")
+        if (await state.get_data()).get("rid") == rid:
+            await state.clear()
+        with suppress(TelegramAPIError):
+            await query.answer("Скасовано")
+        await edit_receipt(bot, item, "Скасовано. Нічого не записано.")
     else:
-        await query.answer()
+        with suppress(TelegramAPIError):
+            await query.answer()
 
 
 @router.message(ManualAmount.waiting, F.text)
-async def on_manual_amount(message: Message, state: FSMContext, pending: PendingStore) -> None:
-    item = pending.get((await state.get_data()).get("rid"))
+async def on_manual_amount(message: Message, bot: Bot, state: FSMContext, pending: PendingStore) -> None:
+    rid = (await state.get_data()).get("rid")
+    item = pending.get(rid)
     if item is None or item.user_id != message.from_user.id:
         await state.clear()
         await message.answer("Чек застарів — надішли фото ще раз.")
@@ -318,13 +377,14 @@ async def on_manual_amount(message: Message, state: FSMContext, pending: Pending
         return
     item.status = "processing"
     await state.clear()
+    await edit_receipt(bot, item, f"Сума: {fmt(amount, item.recognition.currency)} (введено вручну)")
     await finalize(message, item, amount, manual=True)
 
 
 @router.message()
 async def on_other(message: Message) -> None:
     if message.text and parse_amount(message.text) is not None:
-        # Схоже на суму, але чека для неї нема (наприклад, бот перезапускався посеред введення).
-        await message.answer("Не бачу чека, до якого ця сума. Надішли фото чека ще раз.")
+        await message.answer("Щоб записати суму, натисни «✏️ Ввести вручну» під потрібним чеком. "
+                             "Якщо кнопок уже нема — надішли фото чека ще раз.")
         return
     await message.answer(HELP_TEXT)

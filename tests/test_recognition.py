@@ -5,8 +5,9 @@ from decimal import Decimal
 import pytest
 from PIL import Image
 
+import receipt_bot.recognition as recognition
 from receipt_bot.recognition import (
-    MAX_SIDE, NotAnImage, _Candidate, _ModelAnswer, normalize, parse_amount, prepare_image, to_amount,
+    MAX_SIDE, NotAnImage, _Candidate, _ModelAnswer, is_not_total, normalize, parse_amount, prepare_image, to_amount,
 )
 
 
@@ -93,9 +94,10 @@ def test_cash_equal_to_total_keeps_total():
     assert rec.has_total and rec.total == Decimal("400.00") and rec.candidates[0].label == "ДО СПЛАТИ"
 
 
-def test_total_not_among_candidates_is_offered_but_not_trusted():
+def test_total_not_among_candidates_is_offered_last_and_not_called_total():
     rec = normalize(answer(total=50, candidates=[("СУМА", 60)]))
-    assert not rec.has_total and [c.amount for c in rec.candidates] == [Decimal("50.00"), Decimal("60.00")]
+    assert not rec.has_total
+    assert [(c.label, c.amount) for c in rec.candidates] == [("СУМА", Decimal("60.00")), ("Сума (розпізнано)", Decimal("50.00"))]
 
 
 @pytest.mark.parametrize("label", ["БЕЗГОТІВКОВА", "Безготівкова оплата", "ВСЬОГО З ПДВ", "Сума з ПДВ"])
@@ -128,3 +130,43 @@ def test_prepare_image_rejects_truncated_jpeg():
     Image.new("RGB", (800, 600), (200, 200, 200)).save(buf, "JPEG")
     with pytest.raises(NotAnImage):
         prepare_image(buf.getvalue()[:300])
+
+
+@pytest.mark.parametrize("label", ["Сума із ПДВ", "СУМА ЗІ ПДВ", "Сума вкл. ПДВ", "Разом, включаючи ПДВ",
+                                   "Всього з урахуванням ПДВ", "TOTAL INCL. VAT", "PRIVATBANK", "БЕЗ ГОТІВКИ"])
+def test_gross_and_card_labels_are_not_excluded(label):
+    assert not is_not_total(label)
+
+
+def test_labels_are_cleaned_of_invisible_and_bidi_chars():
+    rlo, zwsp, newline = chr(0x202E), chr(0x200B), chr(10)  # зміна напрямку тексту, невидимий пробіл, перенос
+    dirty = rlo + "ДО" + zwsp + " СПЛАТИ" + newline + "  та ще дуже довгий хвіст мітки"
+    label = normalize(answer(total=None, candidates=[(dirty, 10)])).candidates[0].label
+    assert rlo not in label and zwsp not in label and newline not in label
+    assert label.startswith("ДО СПЛАТИ") and len(label) <= 24
+
+
+def test_candidates_are_capped():
+    rec = normalize(answer(total=None, candidates=[(f"Рядок {i}", i + 1) for i in range(20)]))
+    assert len(rec.candidates) == 8
+
+
+def test_prepare_image_rejects_too_many_pixels_before_decoding(monkeypatch):
+    monkeypatch.setattr(recognition, "MAX_PIXELS", 100)
+    buf = io.BytesIO()
+    Image.new("RGB", (20, 20)).save(buf, "JPEG", progressive=True)
+    with pytest.raises(NotAnImage):
+        prepare_image(buf.getvalue())
+
+
+def test_prepare_image_rejects_truncated_content_rich_jpeg():
+    from PIL import ImageDraw
+    img = Image.new("RGB", (1500, 2000), "white")
+    draw = ImageDraw.Draw(img)
+    for y in range(0, 2000, 40):
+        draw.text((20, y), "ДО СПЛАТИ 347.50 " * 8, fill="black")
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=90)
+    data = buf.getvalue()
+    with pytest.raises(NotAnImage):
+        prepare_image(data[: int(len(data) * 0.7)])
