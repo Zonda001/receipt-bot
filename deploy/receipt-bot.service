@@ -1,0 +1,21 @@
+[Unit]
+Description=Receipt Bot (Telegram)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/receipt-bot
+ExecStart=/home/ubuntu/receipt-bot/.venv/bin/python -m receipt_bot
+Restart=on-failure
+RestartSec=5
+
+# Мінімум прав: код і секрети лише читаються, писати можна тільки в data/.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/receipt-bot/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

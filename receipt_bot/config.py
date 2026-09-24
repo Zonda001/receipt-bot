@@ -19,5 +19,14 @@ class Settings(BaseSettings):
     llm_base_url: str
     llm_model: str
     llm_api_key: SecretStr
+    # Groq/OpenAI приймають "none" (без міркувань, швидше); порожньо — параметр не надсилається.
+    llm_reasoning_effort: str = "none"
 
     db_path: str = "data/bot.db"
+
+    # Тимчасово, до Google-авторизації: Telegram ID через кому, кому дозволено надсилати чеки.
+    dev_allowed_user_ids: str = ""
+
+    @property
+    def allowed_ids(self) -> set[int]:
+        return {int(x) for x in self.dev_allowed_user_ids.replace(" ", "").split(",") if x}
