@@ -32,9 +32,7 @@ router = Router()
 
 MAX_FILE_BYTES = 10 * 1024 * 1024
 PENDING_TTL = 24 * 3600
-# Альбом у Telegram — до 10 фото, і їх шлють саме альбомами (напр., 9 квитанцій банку за раз).
-# Темп до моделі й так тримає черга в Recognizer; це лише запобіжник від спаму.
-PHOTOS_PER_MINUTE = 20
+PHOTOS_PER_MINUTE = 20  # квитанції шлють альбомами по 9-10
 IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 HELP_TEXT = (
@@ -132,7 +130,6 @@ class DailyQuota:
 
 
 def rate_limited_note(retry_after: float) -> str:
-    """Чесний текст про ліміт: хвилинний — "за хвилину", денний — скільки реально чекати."""
     if retry_after <= RATE_LIMIT_WAIT_MAX:
         return "Розпізнавання зараз перевантажене. Надішли фото ще раз за хвилину або введи суму вручну."
     minutes = math.ceil(retry_after / 60)
@@ -251,10 +248,8 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, recognizer: Re
         return
 
     # Відповідь цитує фото: якщо чеків кілька, видно, яка сума до якого.
-    ahead = recognizer.in_flight
     status = await message.answer(
-        f"Розпізнаю… (у черзі переді мною ще {ahead})" if ahead else "Розпізнаю…",
-        reply_parameters=ReplyParameters(message_id=message.message_id, allow_sending_without_reply=True))
+        "Розпізнаю…", reply_parameters=ReplyParameters(message_id=message.message_id, allow_sending_without_reply=True))
 
     try:
         image = await bot.download(file.file_id)
@@ -268,7 +263,7 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, recognizer: Re
     note = ""  # непорожня — розпізнати не вдалося, пропонуємо ввести суму вручну
     try:
         if quota.take():
-            rec = await recognizer.recognize(image.read())
+            rec = await recognizer.recognize(image)
         else:
             note = "Ліміт автоматичного розпізнавання на сьогодні вичерпано — суму можна ввести вручну."
     except NotAnImage:
@@ -290,8 +285,7 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, recognizer: Re
         note = "Не вдалося розпізнати чек. Спробуй ще раз пізніше або введи суму вручну."
 
     if rec is not None and not rec.is_receipt:
-        # Модель може помилитися, а людина прийшла записати суму: не відбираємо в неї ручне введення.
-        note = "Не схоже на чек чи квитанцію про оплату."
+        note = "Не схоже на чек чи квитанцію про оплату."  # модель може помилитись — ручне введення лишаємо
         rec = None
     if rec is None:
         rec = Recognition(is_receipt=True)  # сум нема: лишаються тільки "ввести вручну" і "скасувати"
@@ -344,7 +338,7 @@ async def on_action(query: CallbackQuery, callback_data: ReceiptAction, bot: Bot
         with suppress(TelegramAPIError):
             await query.answer("Вже обробляю…" if item.status == "processing" else "Цей чек уже оброблено.")
         return
-    log.info("receipt %s: %s %s", rid, callback_data.action, callback_data.idx if callback_data.action == "ok" else "")
+    log.info("receipt %s: %r %d", rid, callback_data.action, callback_data.idx)  # %r: action приходить від клієнта
 
     if callback_data.action == "ok":
         if not 0 <= callback_data.idx < len(item.recognition.candidates):

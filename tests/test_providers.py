@@ -7,9 +7,10 @@ import httpx
 import pytest
 from PIL import Image
 
+import receipt_bot.recognition as recognition
 from receipt_bot.handlers import rate_limited_note
 from receipt_bot.recognition import (
-    RESPONSE_SCHEMA, NotAnImage, RateLimited, RecognitionError, Recognizer, RecognizerChain,
+    MAX_QUEUE, RESPONSE_SCHEMA, NotAnImage, RateLimited, RecognitionError, Recognizer, RecognizerChain,
     _Candidate, _ModelAnswer, is_fee, is_not_total, normalize,
 )
 
@@ -31,7 +32,7 @@ def test_bank_receipt_offers_sum_and_sum_with_fee_but_not_bare_fee():
     rec = normalize(answer(total=477.42, candidates=[("Сума", 477.42), ("Комісія", 5.00)]))
     assert rec.has_total and rec.total == Decimal("477.42")
     assert [(c.label, c.amount) for c in rec.candidates] == [
-        ("Сума", Decimal("477.42")), ("Сума з комісією", Decimal("482.42"))]
+        ("Сума", Decimal("477.42")), ("Сума + комісія", Decimal("482.42"))]
 
 
 def test_zero_fee_adds_no_extra_button():
@@ -47,6 +48,8 @@ def test_fee_reported_as_total_is_not_preselected():
 @pytest.mark.parametrize("label, expected", [
     ("Комісія", True), ("Сума комісійної винагороди", True), ("Fee", True), ("Service fees", True),
     ("Prowizja", True), ("Сума з комісією", False), ("Сума", False), ("Coffee", False), ("Feedback", False),
+    ("Сума без комісії", False), ("До сплати (вкл. комісію)", False), ("incl. service fee", False),
+    ("TOTAL with fee", False),
 ])
 def test_fee_labels(label, expected):
     assert is_fee(label) is expected
@@ -204,3 +207,108 @@ def test_fallback_extra_body_is_sent():
         assert b'"enable_thinking":false' in seen[0].replace(b" ", b"")
 
     asyncio.run(scenario())
+
+
+# --- знахідки ревю 7714ecc ---
+
+@pytest.mark.parametrize("rows, total, expected", [
+    # у "Разом до сплати" комісія вже є
+    ([("Сума платежу", 500), ("Комісія", 10), ("Разом до сплати", 510)], 510, ["510.00", "500.00"]),
+    ([("Сума платежу", 500), ("Комісія", 10), ("Разом до сплати", 510)], 500, ["500.00", "510.00"]),
+    ([("Service fee", 50), ("TOTAL", 550)], 550, ["550.00"]),
+    ([("Сума без комісії", 1000), ("Комісія", 10), ("Сума з комісією", 1010)], 1010, ["1010.00", "1000.00"]),
+    ([("Сума", 100), ("Комісія", 5), ("До сплати (вкл. комісію)", 105)], 105, ["105.00", "100.00"]),
+])
+def test_fee_is_never_added_twice(rows, total, expected):
+    rec = normalize(answer(total=total, candidates=rows))
+    assert rec.has_total and [str(c.amount) for c in rec.candidates] == expected
+
+
+def test_several_fees_are_summed():
+    rec = normalize(answer(total=1000, candidates=[("Сума", 1000), ("Комісія", 10), ("Комісія банку", 15)]))
+    assert [str(c.amount) for c in rec.candidates] == ["1000.00", "1025.00"]
+
+
+@pytest.mark.parametrize("label, dropped", [("GOTOWKA", True), ("Gotówka", True), ("Bezgotówkowa", False),
+                                            ("bez gotówki", False)])
+def test_polish_cash_labels(label, dropped):
+    assert is_not_total(label) is dropped
+
+
+def test_real_error_wins_over_fallback_rate_limit():
+    async def scenario():
+        primary = with_transport(Recognizer("http://x", "m", "k"), lambda r: httpx.Response(400, text="bad"))
+        fallback = with_transport(Recognizer("http://x", "m", "k"),
+                                  lambda r: httpx.Response(429, headers={"retry-after": "1087"}))
+        with pytest.raises(RecognitionError) as err:
+            await RecognizerChain(primary, fallback).recognize(jpeg())
+        assert not isinstance(err.value, RateLimited)  # основний живий — не кажемо "ліміт на 19 хв"
+
+    asyncio.run(scenario())
+
+
+def test_down_primary_is_skipped_for_a_while(monkeypatch):
+    primary_calls = []
+
+    def down(request):
+        primary_calls.append(request)
+        return httpx.Response(503)
+
+    async def no_sleep(_):
+        return None
+
+    async def scenario():
+        primary = with_transport(Recognizer("http://x", "m", "k"), down)
+        fallback = with_transport(Recognizer("http://x", "m", "k"), lambda r: httpx.Response(200, json=ok_body()))
+        chain = RecognizerChain(primary, fallback)
+        assert (await chain.recognize(jpeg())).total == Decimal("10.00")
+        calls = len(primary_calls)
+        assert (await chain.recognize(jpeg())).total == Decimal("10.00")
+        assert len(primary_calls) == calls  # друге фото — одразу в запасний
+
+    monkeypatch.setattr(recognition.asyncio, "sleep", no_sleep)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("nan"), -5.0, 10 ** 9])
+def test_retry_after_from_provider_is_clamped(value):
+    e = RateLimited(value)
+    assert 0 <= e.retry_after <= 24 * 3600
+    assert rate_limited_note(e.retry_after)  # не падає
+
+
+def test_queue_is_capped():
+    async def scenario():
+        chain = RecognizerChain(with_transport(Recognizer("http://x", "m", "k"),
+                                               lambda r: httpx.Response(200, json=ok_body())))
+        chain.in_flight = MAX_QUEUE
+        with pytest.raises(RateLimited) as err:
+            await chain.recognize(jpeg())
+        assert not err.value.spent and err.value.retry_after <= 60
+
+    asyncio.run(scenario())
+
+
+def test_telegram_file_is_closed_after_reading():
+    async def scenario():
+        chain = RecognizerChain(with_transport(Recognizer("http://x", "m", "k"),
+                                               lambda r: httpx.Response(200, json=ok_body())))
+        f = io.BytesIO(jpeg())
+        await chain.recognize(f)
+        assert f.closed
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("raw", ['["x"]', '{"model": "other"}', '{"messages": []}', '"text"'])
+def test_bad_extra_body_stops_startup(raw):
+    from receipt_bot.__main__ import parse_extra_body
+    with pytest.raises(SystemExit):
+        parse_extra_body(raw)
+
+
+def test_extra_body_ok():
+    from receipt_bot.__main__ import parse_extra_body
+    assert parse_extra_body('{"chat_template_kwargs": {"enable_thinking": false}}') == {
+        "chat_template_kwargs": {"enable_thinking": False}}
+    assert parse_extra_body("  ") is None

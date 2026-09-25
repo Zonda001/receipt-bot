@@ -17,26 +17,22 @@ class Settings(BaseSettings):
     google_owner_token_file: str
     drive_folder_id: str
 
-    # Основний провайдер vision-моделі (будь-який OpenAI-сумісний API). Готові блоки для Cloudflare і Groq —
-    # у .env.example. "Вимкнути міркування" кожен провайдер задає по-своєму, тому обидва поля нижче
-    # порожні за замовчуванням: чужий параметр провайдер може відхилити з помилкою 400.
+    # Vision-модель, будь-який OpenAI-сумісний API; готові блоки — у .env.example.
+    # "Без міркувань" у кожного провайдера своє, тож за замовчуванням не шлемо нічого: чуже поле = 400.
     llm_base_url: str
     llm_model: str
     llm_api_key: SecretStr
-    llm_reasoning_effort: str = ""   # Groq/OpenAI: "none"
-    llm_extra_body: str = ""         # JSON, що додається до запиту. Cloudflare Gemma: {"chat_template_kwargs": {"enable_thinking": false}}
+    llm_reasoning_effort: str = ""   # Groq: none
+    llm_extra_body: str = ""         # JSON; Cloudflare: {"chat_template_kwargs": {"enable_thinking": false}}
 
-    # Запасний провайдер (порожній base_url — вимкнено): бере фото, коли основний вичерпав денний ліміт,
-    # впав або відповів сміттям.
+    # Запасний провайдер; порожній base_url — вимкнено.
     llm_fallback_base_url: str = ""
     llm_fallback_model: str = ""
     llm_fallback_api_key: SecretStr = SecretStr("")
     llm_fallback_reasoning_effort: str = ""
     llm_fallback_extra_body: str = ""
 
-    # Стеля розпізнавань на добу на всю команду — запобіжник від зациклення чи спаму.
-    # Реальні стелі безкоштовних тарифів (заміряно 25.09): Cloudflare — 10K нейронів/добу, ~9 на чек -> ~1100 чеків;
-    # Groq — 200K токенів/добу, ~2.3K на чек -> ~80 чеків. Лише з Groq варто поставити ~80.
+    # Запобіжник на добу на всю команду. Стелі free-тарифів: Cloudflare ~1100 чеків, Groq ~80.
     daily_recognitions: int = 300
 
     db_path: str = "data/bot.db"

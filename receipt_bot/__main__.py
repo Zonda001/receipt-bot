@@ -30,17 +30,30 @@ class RedactingFormatter(logging.Formatter):
         return text
 
 
+PROTECTED_FIELDS = {"model", "messages", "response_format"}
+
+
 def provider_name(base_url: str) -> str:
-    """https://api.cloudflare.com/... -> "cloudflare", https://api.groq.com/... -> "groq": щоб у журналі було видно, хто відповів."""
+    """https://api.groq.com/... -> "groq" — для журналу."""
     host = urlparse(base_url).hostname or "llm"
     parts = host.split(".")
     return parts[-2] if len(parts) >= 2 else host
 
 
+def parse_extra_body(raw: str) -> dict | None:
+    if not raw.strip():
+        return None
+    extra = json.loads(raw)
+    if not isinstance(extra, dict):
+        raise SystemExit("LLM_*EXTRA_BODY має бути JSON-об'єктом {...}")
+    if clash := PROTECTED_FIELDS & extra.keys():
+        raise SystemExit(f"LLM_*EXTRA_BODY не може міняти {sorted(clash)}")
+    return extra
+
+
 def make_recognizer(base_url: str, model: str, api_key: str, reasoning_effort: str, extra_body: str) -> Recognizer:
     return Recognizer(base_url=base_url, model=model, api_key=api_key, reasoning_effort=reasoning_effort,
-                      extra_body=json.loads(extra_body) if extra_body.strip() else None,
-                      name=provider_name(base_url))
+                      extra_body=parse_extra_body(extra_body), name=provider_name(base_url))
 
 
 async def main() -> None:
