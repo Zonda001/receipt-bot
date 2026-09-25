@@ -28,12 +28,14 @@ MAX_COMPLETION_TOKENS = 400          # Groq резервує ліміт токе
 RATE_LIMIT_WAIT_MAX = 20             # чекаємо retry-after не довше, ніж користувач готовий дивитись на "Розпізнаю…"
 
 # Рядки, які ніколи не є сумою до сплати: ПДВ, решта, внесена готівка (але не "безготівкова").
-# ПДВ/VAT — тільки окремим словом: інакше "PRIVATBANK" теж вважався б рядком ПДВ.
-NOT_TOTAL_LABELS = re.compile(r"(?<!\w)(?:ПДВ|VAT)(?!\w)|РЕШТА|(?<!БЕЗ)(?<!БЕЗ )ГОТІВК", re.IGNORECASE)
-# ...крім підсумку "з ПДВ" у різних формах: це якраз повна сума, а не податок.
-GROSS_LABELS = re.compile(
-    r"(?<!\w)(?:З|ІЗ|ЗІ|ВКЛ\.?|ВКЛЮЧНО З|ВКЛЮЧАЮЧИ|З УРАХУВАННЯМ|INCL\.?|INCLUDING)\s+(?:ПДВ|VAT)(?!\w)",
-    re.IGNORECASE)
+# ПДВ/VAT — не частиною іншого слова ("PRIVATBANK"), але ставка впритул ("ПДВ20%") — теж ПДВ.
+NOT_TOTAL_LABELS = re.compile(r"(?<![^\W\d_])(?:ПДВ|VAT)(?![^\W\d_])|РЕШТА|(?<!БЕЗ)(?<!БЕЗ )ГОТІВК", re.IGNORECASE)
+# ...крім підсумку "з ПДВ": це якраз повна сума, а не податок.
+GROSS_LABELS = re.compile(r"(?<!\w)(?:З|ІЗ|ЗІ|З УРАХУВАННЯМ)\s+(?:ПДВ|VAT)(?![^\W\d_])", re.IGNORECASE)
+# "Вкл. ПДВ 20%" на чеку зазвичай рядок самого податку; повна сума — лише якщо поруч слово підсумку.
+INCL_LABELS = re.compile(
+    r"(?<!\w)(?:ВКЛ\.?|ВКЛЮЧНО З|ВКЛЮЧАЮЧИ|INCL\.?|INCLUDING)\s+(?:ПДВ|VAT)(?![^\W\d_])", re.IGNORECASE)
+TOTAL_WORDS = re.compile(r"СУМА|РАЗОМ|ВСЬОГО|ДО СПЛАТИ|TOTAL", re.IGNORECASE)
 MAX_CANDIDATES = 8
 LABEL_LEN = 24
 
@@ -82,6 +84,7 @@ class RateLimited(RecognitionError):
     def __init__(self, retry_after: float):
         super().__init__(f"rate limited, retry after {retry_after:.0f}s")
         self.retry_after = retry_after
+        self.spent = False  # True: перший запит уже дійшов до моделі (429 прилетів на повторі)
 
 
 class NotAnImage(RecognitionError):
@@ -170,19 +173,21 @@ def _parse_date(value: str | None) -> date | None:
 
 
 def _clean_label(label: str) -> str:
-    """Мітка з чека -> безпечний короткий текст для кнопки.
+    """Мітка з чека -> безпечний текст без невидимих символів (обрізати до LABEL_LEN — тільки для показу).
 
     Текст на фото контролює той, хто фотографує: прибираємо невидимі й керуючі символи
     (зокрема зміну напрямку тексту), щоб мітка не могла вдавати іншу кнопку.
     """
     visible = "".join(ch for ch in label if unicodedata.category(ch) not in {"Cc", "Cf", "Co", "Cs", "Zl", "Zp"})
-    return " ".join(visible.split())[:LABEL_LEN]
+    return " ".join(visible.split())
 
 
 def is_not_total(label: str) -> bool:
     """Рядок ПДВ / решти / внесеної готівки — такий рядок ніколи не є сумою до сплати."""
     text = " ".join(label.split())
-    return bool(NOT_TOTAL_LABELS.search(text)) and not GROSS_LABELS.search(text)
+    if not NOT_TOTAL_LABELS.search(text) or GROSS_LABELS.search(text):
+        return False
+    return not (INCL_LABELS.search(text) and TOTAL_WORDS.search(text))
 
 
 def normalize(answer: _ModelAnswer) -> Recognition:
@@ -190,7 +195,9 @@ def normalize(answer: _ModelAnswer) -> Recognition:
     if not answer.is_receipt:
         return Recognition(is_receipt=False)
 
-    rows = [(_clean_label(c.label), to_amount(c.amount)) for c in answer.candidates[:MAX_CANDIDATES]]
+    # Класифікуємо за повною міткою: "ГОТІВК"/"ПДВ" може стояти далі, ніж обріжеться кнопка.
+    # Ліміт MAX_CANDIDATES — на кнопки, не на вхід: інакше вісім рядків ПДВ витіснили б справжній підсумок.
+    rows = [(_clean_label(c.label), to_amount(c.amount)) for c in answer.candidates[:4 * MAX_CANDIDATES]]
     rows = [(label, amount) for label, amount in rows if amount is not None]
 
     total = to_amount(answer.total)
@@ -204,14 +211,16 @@ def normalize(answer: _ModelAnswer) -> Recognition:
     candidates: list[Candidate] = []
     seen: set[Decimal] = set()
     if trusted:
-        candidates.append(Candidate(total_label, total))
+        candidates.append(Candidate(total_label[:LABEL_LEN], total))
         seen.add(total)
     for label, amount in rows:
         if amount in seen or is_not_total(label):
             continue
-        candidates.append(Candidate(label or "Сума", amount))
+        candidates.append(Candidate(label[:LABEL_LEN] or "Сума", amount))
         seen.add(amount)
-    if total is not None and not trusted and total not in seen:
+    reserve = total is not None and not trusted and total not in seen
+    del candidates[MAX_CANDIDATES - reserve:]
+    if reserve:
         # Модель назвала суму, якої нема серед рядків чека: пропонуємо, але останньою і без слова "підсумок".
         candidates.append(Candidate("Сума (розпізнано)", total))
 
@@ -331,6 +340,13 @@ class Recognizer:
                 raise Truncated("model answer cut off by max_completion_tokens") from e
             raise RecognitionError(f"bad model answer ({type(e).__name__}, finish={finish})") from e
 
+    async def _retry_post(self, body: dict) -> dict:
+        try:
+            return await self._post(body)
+        except RateLimited as e:
+            e.spent = True
+            raise
+
     async def recognize(self, image: bytes) -> Recognition:
         async with _IMAGE_SLOTS:
             jpeg = await asyncio.to_thread(prepare_image, image)
@@ -342,12 +358,12 @@ class Recognizer:
         except Truncated:
             # Той самий запит при temperature=0 обріжеться так само: один повтор з більшим запасом токенів.
             log.warning("answer truncated, retrying with a larger token budget")
-            data = await self._post({**body, "max_completion_tokens": 2 * MAX_COMPLETION_TOKENS})
+            data = await self._retry_post({**body, "max_completion_tokens": 2 * MAX_COMPLETION_TOKENS})
             answer = self._parse(data)
         except RecognitionError as e:
             # Один повтор на випадок сміття у відповіді (фолбек-провайдери тримають схему не так суворо).
             log.warning("retrying after %s", e)
-            data = await self._post(body)
+            data = await self._retry_post(body)
             answer = self._parse(data)
 
         usage = data.get("usage") or {}

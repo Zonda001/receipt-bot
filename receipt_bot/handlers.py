@@ -185,14 +185,20 @@ async def edit_receipt(bot: Bot, item: Pending, text: str, markup: InlineKeyboar
         await bot.edit_message_text(text=text, chat_id=item.chat_id, message_id=item.msg_id, reply_markup=markup)
 
 
-async def release_manual(bot: Bot, state: FSMContext, pending: PendingStore, keep_rid: str | None = None) -> None:
-    """Скинути очікування ручної суми. Якщо чекали суму для іншого чека — повернути йому кнопки.
+async def release_manual(bot: Bot, state: FSMContext, pending: PendingStore, new_rid: str | None = None) -> None:
+    """Скинути очікування ручної суми (або переключити його на new_rid). Попередньому чеку — повернути кнопки.
 
     Ручне введення одне на користувача: без цього сума, набрана для чека A, могла б піти в чек B.
+    Стан міняється до першого мережевого await: інакше швидкий тап по іншому чеку
+    встиг би записати свій rid, а цей виклик потім перезаписав би його.
     """
     rid = (await state.get_data()).get("rid")
-    await state.clear()
-    if not rid or rid == keep_rid:
+    if new_rid is None:
+        await state.clear()
+    else:
+        await state.set_state(ManualAmount.waiting)
+        await state.set_data({"rid": new_rid})
+    if not rid or rid == new_rid:
         return
     item = pending.get(rid)
     if item is not None and item.status == "pending":
@@ -258,7 +264,8 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, recognizer: Re
             "Надішли чек як звичайне фото, не файлом.")
         return
     except RateLimited as e:
-        quota.give_back()
+        if not e.spent:
+            quota.give_back()  # 429 на першому ж запиті: модель чек не бачила
         log.warning("rate limited, retry after %.0fs", e.retry_after)
         note = "Розпізнавання зараз перевантажене. Надішли фото ще раз за хвилину або введи суму вручну."
     except RecognitionError as e:
@@ -300,7 +307,12 @@ async def finalize(message: Message, item: Pending, amount: Decimal, manual: boo
 
 @router.callback_query(ReceiptAction.filter())
 async def on_action(query: CallbackQuery, callback_data: ReceiptAction, bot: Bot, state: FSMContext,
-                    pending: PendingStore) -> None:
+                    pending: PendingStore, allowed_ids: set[int]) -> None:
+    if not is_allowed(query.from_user.id, allowed_ids):
+        # Прибраний зі списку не повинен дописати свої старі чеки (з Google-етапом це вже запис у таблицю).
+        with suppress(TelegramAPIError):
+            await query.answer("Немає доступу.", show_alert=True)
+        return
     rid = callback_data.rid
     item = pending.get(rid)
     if item is None:
@@ -335,18 +347,18 @@ async def on_action(query: CallbackQuery, callback_data: ReceiptAction, bot: Bot
         else:
             item.status = "done"
     elif callback_data.action == "manual":
-        await release_manual(bot, state, pending, keep_rid=rid)
-        await state.set_state(ManualAmount.waiting)
-        await state.update_data(rid=rid)
+        await release_manual(bot, state, pending, new_rid=rid)
         with suppress(TelegramAPIError):
             await query.answer()
-        await edit_receipt(bot, item, *manual_view(rid, item.recognition))
+        if item.status == "pending":  # поки чекали Telegram, чек могли підтвердити кнопкою або скасувати
+            await edit_receipt(bot, item, *manual_view(rid, item.recognition))
     elif callback_data.action == "back":
         if (await state.get_data()).get("rid") == rid:
             await state.clear()
         with suppress(TelegramAPIError):
             await query.answer()
-        await edit_receipt(bot, item, *result_view(rid, item.recognition, item.note))
+        if item.status == "pending":
+            await edit_receipt(bot, item, *result_view(rid, item.recognition, item.note))
     elif callback_data.action == "cancel":
         item.status = "cancelled"
         if (await state.get_data()).get("rid") == rid:
@@ -360,10 +372,11 @@ async def on_action(query: CallbackQuery, callback_data: ReceiptAction, bot: Bot
 
 
 @router.message(ManualAmount.waiting, F.text)
-async def on_manual_amount(message: Message, bot: Bot, state: FSMContext, pending: PendingStore) -> None:
+async def on_manual_amount(message: Message, bot: Bot, state: FSMContext, pending: PendingStore,
+                           allowed_ids: set[int]) -> None:
     rid = (await state.get_data()).get("rid")
     item = pending.get(rid)
-    if item is None or item.user_id != message.from_user.id:
+    if item is None or item.user_id != message.from_user.id or not is_allowed(message.from_user.id, allowed_ids):
         await state.clear()
         await message.answer("Чек застарів — надішли фото ще раз.")
         return

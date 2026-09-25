@@ -170,3 +170,25 @@ def test_prepare_image_rejects_truncated_content_rich_jpeg():
     data = buf.getvalue()
     with pytest.raises(NotAnImage):
         prepare_image(data[: int(len(data) * 0.7)])
+
+
+@pytest.mark.parametrize("label", ["ПДВ20%", "VAT20%", "Вкл. ПДВ 20%", "Incl. VAT 20%", "ПДВ_А"])
+def test_vat_with_attached_rate_or_bare_incl_is_dropped(label):
+    assert is_not_total(label)
+
+
+def test_cash_keyword_past_button_width_is_still_detected():
+    rec = normalize(answer(total=500, candidates=[("ДО СПЛАТИ", 347.5), ("Отримано від покупця готівкою", 500)]))
+    assert not rec.has_total
+    assert [c.amount for c in rec.candidates] == [Decimal("347.50")]  # внесена готівка не пропонується взагалі
+
+
+def test_cap_applies_after_dropping_vat_rows():
+    rows = [(f"ПДВ А 20% {i}", 10 + i) for i in range(8)] + [("ДО СПЛАТИ", 347.5)]
+    rec = normalize(answer(total=347.5, candidates=rows))
+    assert rec.has_total and rec.total == Decimal("347.50") and rec.candidates[0].label == "ДО СПЛАТИ"
+
+
+def test_untrusted_total_survives_the_cap():
+    rec = normalize(answer(total=999, candidates=[(f"Рядок {i}", i + 1) for i in range(20)]))
+    assert len(rec.candidates) == 8 and rec.candidates[-1].amount == Decimal("999.00")
