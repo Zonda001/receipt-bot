@@ -32,6 +32,9 @@ from receipt_bot.storage import Users
 
 log = logging.getLogger(__name__)
 router = Router()
+# Лише особисті чати: у групі код /login бачать усі, і будь-хто міг би ввести його своїм акаунтом.
+router.message.filter(F.chat.type == "private")
+router.callback_query.filter(F.message.chat.type == "private")
 
 MAX_FILE_BYTES = 10 * 1024 * 1024
 PENDING_TTL = 24 * 3600
@@ -285,15 +288,12 @@ async def finish_login(message: Message, code, users: Users, google: GoogleStore
     try:
         email = await login.wait_for_email(code)
     except LoginDenied:
-        await message.answer("Вхід скасовано.")
-        return
+        return await say(message, "Вхід скасовано.")
     except LoginExpired:
-        await message.answer("Код прострочено. Надішли /login ще раз.")
-        return
+        return await say(message, "Код прострочено. Надішли /login ще раз.")
     except GoogleError as e:
         log.warning("login failed: %s", e)
-        await message.answer("Не вдалося завершити вхід. Спробуй /login ще раз.")
-        return
+        return await say(message, "Не вдалося завершити вхід. Спробуй /login ще раз.")
     finally:
         if logins.get(user_id) is asyncio.current_task():
             logins.pop(user_id, None)
@@ -301,8 +301,12 @@ async def finish_login(message: Message, code, users: Users, google: GoogleStore
     log.info("user %s linked a Google account", user_id)
     # Ім'я акаунта — завжди: якщо код підсунули, людина побачить чужий email.
     problem = await access_problem(user_id, users, google)
-    await message.answer(f"✅ Ти увійшов як {email}.\n"
-                         + (problem or "Доступ до таблиці є — надсилай фото чеків."))
+    await say(message, f"✅ Ти увійшов як {email}.\n" + (problem or "Доступ до таблиці є — надсилай фото чеків."))
+
+
+async def say(message: Message, text: str) -> None:
+    with suppress(TelegramAPIError):  # людина могла заблокувати бота, поки логінилась
+        await message.answer(text)
 
 
 @router.message(Command("logout"))
