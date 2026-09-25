@@ -17,13 +17,27 @@ class Settings(BaseSettings):
     google_owner_token_file: str
     drive_folder_id: str
 
+    # Основний провайдер vision-моделі (будь-який OpenAI-сумісний API). Готові блоки для Cloudflare і Groq —
+    # у .env.example. "Вимкнути міркування" кожен провайдер задає по-своєму, тому обидва поля нижче
+    # порожні за замовчуванням: чужий параметр провайдер може відхилити з помилкою 400.
     llm_base_url: str
     llm_model: str
     llm_api_key: SecretStr
-    # Groq/OpenAI приймають "none" (без міркувань, швидше); порожньо — параметр не надсилається.
-    llm_reasoning_effort: str = "none"
-    # Стеля розпізнавань на добу на всю команду (Groq free: ~200K токенів/добу, ~1.5-2K на чек).
-    daily_recognitions: int = 100
+    llm_reasoning_effort: str = ""   # Groq/OpenAI: "none"
+    llm_extra_body: str = ""         # JSON, що додається до запиту. Cloudflare Gemma: {"chat_template_kwargs": {"enable_thinking": false}}
+
+    # Запасний провайдер (порожній base_url — вимкнено): бере фото, коли основний вичерпав денний ліміт,
+    # впав або відповів сміттям.
+    llm_fallback_base_url: str = ""
+    llm_fallback_model: str = ""
+    llm_fallback_api_key: SecretStr = SecretStr("")
+    llm_fallback_reasoning_effort: str = ""
+    llm_fallback_extra_body: str = ""
+
+    # Стеля розпізнавань на добу на всю команду — запобіжник від зациклення чи спаму.
+    # Реальні стелі безкоштовних тарифів (заміряно 25.09): Cloudflare — 10K нейронів/добу, ~9 на чек -> ~1100 чеків;
+    # Groq — 200K токенів/добу, ~2.3K на чек -> ~80 чеків. Лише з Groq варто поставити ~80.
+    daily_recognitions: int = 300
 
     db_path: str = "data/bot.db"
 

@@ -4,6 +4,7 @@
 Чеки в очікуванні живуть у пам'яті: після рестарту старі кнопки чесно кажуть «чек застарів».
 """
 import logging
+import math
 import secrets
 import time
 from collections import defaultdict, deque
@@ -23,7 +24,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, ReplyPar
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from receipt_bot.recognition import (
-    NotAnImage, RateLimited, Recognition, RecognitionError, Recognizer, parse_amount,
+    RATE_LIMIT_WAIT_MAX, NotAnImage, RateLimited, Recognition, RecognitionError, RecognizerChain, parse_amount,
 )
 
 log = logging.getLogger(__name__)
@@ -31,7 +32,9 @@ router = Router()
 
 MAX_FILE_BYTES = 10 * 1024 * 1024
 PENDING_TTL = 24 * 3600
-PHOTOS_PER_MINUTE = 5
+# Альбом у Telegram — до 10 фото, і їх шлють саме альбомами (напр., 9 квитанцій банку за раз).
+# Темп до моделі й так тримає черга в Recognizer; це лише запобіжник від спаму.
+PHOTOS_PER_MINUTE = 20
 IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 HELP_TEXT = (
@@ -128,6 +131,15 @@ class DailyQuota:
             self._used -= 1
 
 
+def rate_limited_note(retry_after: float) -> str:
+    """Чесний текст про ліміт: хвилинний — "за хвилину", денний — скільки реально чекати."""
+    if retry_after <= RATE_LIMIT_WAIT_MAX:
+        return "Розпізнавання зараз перевантажене. Надішли фото ще раз за хвилину або введи суму вручну."
+    minutes = math.ceil(retry_after / 60)
+    wait = f"{minutes} хв" if minutes < 90 else f"{math.ceil(minutes / 60)} год"
+    return f"Ліміт автоматичного розпізнавання вичерпано, відновиться приблизно за {wait}. Суму можна ввести вручну."
+
+
 def currency_name(currency: str) -> str:
     return "грн" if currency == "UAH" else currency
 
@@ -213,7 +225,7 @@ async def on_start(message: Message, bot: Bot, state: FSMContext, pending: Pendi
 
 
 @router.message(F.photo | F.document)
-async def on_photo(message: Message, bot: Bot, state: FSMContext, recognizer: Recognizer,
+async def on_photo(message: Message, bot: Bot, state: FSMContext, recognizer: RecognizerChain,
                    pending: PendingStore, limiter: RateLimiter, quota: DailyQuota, allowed_ids: set[int]) -> None:
     user_id = message.from_user.id
     if not is_allowed(user_id, allowed_ids):
@@ -239,8 +251,10 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, recognizer: Re
         return
 
     # Відповідь цитує фото: якщо чеків кілька, видно, яка сума до якого.
+    ahead = recognizer.in_flight
     status = await message.answer(
-        "Розпізнаю…", reply_parameters=ReplyParameters(message_id=message.message_id, allow_sending_without_reply=True))
+        f"Розпізнаю… (у черзі переді мною ще {ahead})" if ahead else "Розпізнаю…",
+        reply_parameters=ReplyParameters(message_id=message.message_id, allow_sending_without_reply=True))
 
     try:
         image = await bot.download(file.file_id)
@@ -267,7 +281,7 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, recognizer: Re
         if not e.spent:
             quota.give_back()  # 429 на першому ж запиті: модель чек не бачила
         log.warning("rate limited, retry after %.0fs", e.retry_after)
-        note = "Розпізнавання зараз перевантажене. Надішли фото ще раз за хвилину або введи суму вручну."
+        note = rate_limited_note(e.retry_after)
     except RecognitionError as e:
         log.warning("recognition failed: %s", e)
         note = "Не вдалося розпізнати чек. Спробуй ще раз пізніше або введи суму вручну."
@@ -275,11 +289,12 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, recognizer: Re
         log.exception("unexpected error while recognizing")
         note = "Не вдалося розпізнати чек. Спробуй ще раз пізніше або введи суму вручну."
 
+    if rec is not None and not rec.is_receipt:
+        # Модель може помилитися, а людина прийшла записати суму: не відбираємо в неї ручне введення.
+        note = "Не схоже на чек чи квитанцію про оплату."
+        rec = None
     if rec is None:
         rec = Recognition(is_receipt=True)  # сум нема: лишаються тільки "ввести вручну" і "скасувати"
-    elif not rec.is_receipt:
-        await status.edit_text("Це не схоже на чек. Надішли фото чека.")
-        return
 
     item = Pending(user_id=user_id, file_id=file.file_id, recognition=rec, created=time.time(),
                    chat_id=status.chat.id, msg_id=status.message_id, note=note)
@@ -329,6 +344,7 @@ async def on_action(query: CallbackQuery, callback_data: ReceiptAction, bot: Bot
         with suppress(TelegramAPIError):
             await query.answer("Вже обробляю…" if item.status == "processing" else "Цей чек уже оброблено.")
         return
+    log.info("receipt %s: %s %s", rid, callback_data.action, callback_data.idx if callback_data.action == "ok" else "")
 
     if callback_data.action == "ok":
         if not 0 <= callback_data.idx < len(item.recognition.candidates):
@@ -390,6 +406,7 @@ async def on_manual_amount(message: Message, bot: Bot, state: FSMContext, pendin
         return
     item.status = "processing"
     await state.clear()
+    log.info("receipt %s: manual amount", rid)
     await edit_receipt(bot, item, f"Сума: {fmt(amount, item.recognition.currency)} (введено вручну)")
     await finalize(message, item, amount, manual=True)
 
