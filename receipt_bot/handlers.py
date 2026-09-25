@@ -24,7 +24,9 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, ReplyParameters
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from receipt_bot.google_api import GoogleError, GoogleLogin, GoogleStore, LoginDenied, LoginExpired, ReceiptRow
+from receipt_bot.google_api import (
+    GoogleError, GoogleLogin, GoogleStore, GoogleUnsure, LoginDenied, LoginExpired, ReceiptRow,
+)
 from receipt_bot.recognition import (
     RATE_LIMIT_WAIT_MAX, NotAnImage, RateLimited, Recognition, RecognitionError, RecognizerChain, parse_amount,
 )
@@ -272,14 +274,15 @@ async def on_login(message: Message, users: Users, google: GoogleStore, login: G
         log.warning("login start failed: %s", e)
         await message.answer("Google зараз не відповідає. Спробуй /login ще раз за хвилину.")
         return
+    # Скасувати старий і стати на його місце — без await між ними, інакше два /login поспіль лишать обидва.
     if old := logins.pop(user_id, None):
-        old.cancel()  # новий /login замінює старий код
-    await message.answer(
-        f"1. Відкрий {code.url}\n"
-        f"2. Введи код: {code.user_code}\n"
-        "3. Обери Google-акаунт, який має доступ до таблиці.\n\n"
-        f"Код дійсний {code.expires_in // 60} хв. Я напишу, щойно вхід пройде.")
+        old.cancel()
     logins[user_id] = asyncio.create_task(finish_login(message, code, users, google, login, logins))
+    await say(message,
+              f"1. Відкрий {code.url}\n"
+              f"2. Введи код: {code.user_code}\n"
+              "3. Обери Google-акаунт, який має доступ до таблиці.\n\n"
+              f"Код дійсний {code.expires_in // 60} хв. Я напишу, щойно вхід пройде.")
 
 
 async def finish_login(message: Message, code, users: Users, google: GoogleStore, login: GoogleLogin,
@@ -291,8 +294,8 @@ async def finish_login(message: Message, code, users: Users, google: GoogleStore
         return await say(message, "Вхід скасовано.")
     except LoginExpired:
         return await say(message, "Код прострочено. Надішли /login ще раз.")
-    except GoogleError as e:
-        log.warning("login failed: %s", e)
+    except Exception as e:  # фонове завдання: без цього людина просто не отримала б відповіді
+        log.warning("login failed: %s", e if isinstance(e, GoogleError) else type(e).__name__)
         return await say(message, "Не вдалося завершити вхід. Спробуй /login ще раз.")
     finally:
         if logins.get(user_id) is asyncio.current_task():
@@ -310,7 +313,9 @@ async def say(message: Message, text: str) -> None:
 
 
 @router.message(Command("logout"))
-async def on_logout(message: Message, users: Users) -> None:
+async def on_logout(message: Message, users: Users, logins: dict[int, asyncio.Task]) -> None:
+    if pending_login := logins.pop(message.from_user.id, None):
+        pending_login.cancel()  # інакше незавершений вхід прив'язав би акаунт уже після виходу
     users.unlink(message.from_user.id)
     await message.answer("Вийшов. Щоб знову надсилати чеки — /login")
 
@@ -408,7 +413,7 @@ async def finalize(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: b
     """Викликати одразу після item.status = "processing". Записує чек або повертає його в pending з кнопками."""
     shown = fmt(amount, item.recognition.currency) + (" (введено вручну)" if manual else "")
     try:
-        link = await save(bot, item, amount, manual, users, google)
+        link = await save(bot, rid, item, amount, manual, users, google)
     except NotSaved as e:
         item.status = "pending"
         await edit_receipt(bot, item, *result_view(rid, item.recognition, item.note))
@@ -419,7 +424,8 @@ async def finalize(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: b
     await reply(bot, item, f"✅ Записано в таблицю: {shown}\nФото: {link}")
 
 
-async def save(bot: Bot, item: Pending, amount: Decimal, manual: bool, users: Users, google: GoogleStore) -> str:
+async def save(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: bool, users: Users,
+               google: GoogleStore) -> str:
     """Доступ (ще раз: його могли забрати) -> фото з Telegram -> Drive -> Sheets. Повертає посилання на фото."""
     email = users.email(item.user_id)
     if email is None:
@@ -430,13 +436,17 @@ async def save(bot: Bot, item: Pending, amount: Decimal, manual: bool, users: Us
         photo = await bot.download(item.file_id)
         now = now_local()
         rec = item.recognition
-        row = ReceiptRow(added_at=now.strftime("%Y-%m-%d %H:%M"),
+        row = ReceiptRow(receipt_id=rid, added_at=now.strftime("%Y-%m-%d %H:%M"),
                          receipt_date=rec.receipt_date.isoformat() if rec.receipt_date else "",
                          sender=item.sender, email=email, amount=float(amount), currency=rec.currency, manual=manual)
-        name = f"{now:%Y-%m-%d %H-%M} {amount} {rec.currency}.{EXTENSIONS.get(item.mime, 'jpg')}"
+        name = f"{now:%Y-%m-%d %H-%M} {amount} {rec.currency} {rid}.{EXTENSIONS.get(item.mime, 'jpg')}"
         return await google.save_receipt(photo.read(), item.mime, name, row)
     except NotSaved:
         raise
+    except GoogleUnsure as e:
+        log.warning("receipt %s: outcome unknown: %s", rid, e)
+        raise NotSaved(f"Google не відповів вчасно — не впевнений, чи чек записався. "
+                       f"Перевір таблицю (ID {rid}), перш ніж натискати ще раз.") from e
     except GoogleError as e:
         log.warning("saving receipt failed: %s", e)
         raise NotSaved("Не вдалося записати в Google (Drive або таблиця).") from e

