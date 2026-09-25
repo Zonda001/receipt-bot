@@ -35,11 +35,4 @@ class Settings(BaseSettings):
     # Запобіжник на добу на всю команду. Стелі free-тарифів: Cloudflare ~1100 чеків, Groq ~80.
     daily_recognitions: int = 300
 
-    db_path: str = "data/bot.db"
-
-    # Тимчасово, до Google-авторизації: Telegram ID через кому, кому дозволено надсилати чеки.
-    dev_allowed_user_ids: str = ""
-
-    @property
-    def allowed_ids(self) -> set[int]:
-        return {int(x) for x in self.dev_allowed_user_ids.replace(" ", "").split(",") if x}
+    db_path: str = "data/bot.db"  # хто з Telegram яким Google-акаунтом увійшов

@@ -3,11 +3,14 @@ import json
 import logging
 from urllib.parse import urlparse
 
+import httpx
 from aiogram import Bot, Dispatcher
 
 from receipt_bot.config import Settings
-from receipt_bot.handlers import PHOTOS_PER_MINUTE, DailyQuota, PendingStore, RateLimiter, router
+from receipt_bot.google_api import GoogleLogin, GoogleStore
+from receipt_bot.handlers import LOGINS_PER_MINUTE, PHOTOS_PER_MINUTE, DailyQuota, PendingStore, RateLimiter, router
 from receipt_bot.recognition import Recognizer, RecognizerChain
+from receipt_bot.storage import Users
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 log = logging.getLogger("receipt_bot")
@@ -76,13 +79,21 @@ async def main() -> None:
                                    settings.llm_fallback_reasoning_effort, settings.llm_fallback_extra_body)
     log.info("vision providers: %s", " -> ".join(p.name for p in (primary, fallback) if p))
     recognizer = RecognizerChain(primary, fallback)
+
+    google_http = httpx.AsyncClient(timeout=30)
+    users = Users(settings.db_path)
     bot = Bot(bot_token)
     dp = Dispatcher(
         recognizer=recognizer,
         pending=PendingStore(),
         limiter=RateLimiter(PHOTOS_PER_MINUTE),
+        login_limiter=RateLimiter(LOGINS_PER_MINUTE),
         quota=DailyQuota(settings.daily_recognitions),
-        allowed_ids=settings.allowed_ids,
+        users=users,
+        login=GoogleLogin(settings.google_oauth_client_file, google_http),
+        google=GoogleStore(settings.google_sa_key_file, settings.google_oauth_client_file,
+                           settings.google_owner_token_file, settings.sheet_id, settings.drive_folder_id, google_http),
+        logins={},
     )
     dp.include_router(router)
 
@@ -90,6 +101,8 @@ async def main() -> None:
         await dp.start_polling(bot)
     finally:
         await recognizer.close()
+        await google_http.aclose()
+        users.close()
 
 
 if __name__ == "__main__":
