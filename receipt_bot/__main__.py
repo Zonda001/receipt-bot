@@ -8,7 +8,10 @@ from aiogram import Bot, Dispatcher
 
 from receipt_bot.config import Settings
 from receipt_bot.google_api import GoogleLogin, GoogleStore
-from receipt_bot.handlers import LOGINS_PER_MINUTE, PHOTOS_PER_MINUTE, DailyQuota, PendingStore, RateLimiter, router
+from receipt_bot.handlers import (
+    LOGINS_GLOBAL_PER_MINUTE, LOGINS_PER_MINUTE, PHOTOS_PER_MINUTE, REPLIES_PER_MINUTE, SAVES_PER_DAY, DailyQuota,
+    PendingStore, RateLimiter, SaveLimit, router,
+)
 from receipt_bot.recognition import Recognizer, RecognizerChain
 from receipt_bot.storage import Users
 
@@ -88,6 +91,9 @@ async def main() -> None:
         pending=PendingStore(),
         limiter=RateLimiter(PHOTOS_PER_MINUTE),
         login_limiter=RateLimiter(LOGINS_PER_MINUTE),
+        login_global=RateLimiter(LOGINS_GLOBAL_PER_MINUTE),
+        chatter=RateLimiter(REPLIES_PER_MINUTE),
+        saves=SaveLimit(SAVES_PER_DAY),
         quota=DailyQuota(settings.daily_recognitions),
         users=users,
         login=GoogleLogin(settings.google_oauth_client_file, google_http),
@@ -98,7 +104,7 @@ async def main() -> None:
     dp.include_router(router)
 
     try:
-        await dp.start_polling(bot)
+        await dp.start_polling(bot, tasks_concurrency_limit=50)  # стеля на одночасні оновлення
     finally:
         await recognizer.close()
         await google_http.aclose()

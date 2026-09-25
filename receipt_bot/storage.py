@@ -17,11 +17,16 @@ class Users:
         row = self._db.execute("SELECT email FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
         return row[0] if row else None
 
-    def link(self, telegram_id: int, email: str) -> None:
+    def link(self, telegram_id: int, email: str) -> list[int]:
+        """One email - one Telegram account. Returns the accounts that lost it (they get told)."""
+        displaced = [row[0] for row in self._db.execute(
+            "SELECT telegram_id FROM users WHERE email = ? AND telegram_id != ?", (email, telegram_id))]
+        self._db.execute("DELETE FROM users WHERE email = ? AND telegram_id != ?", (email, telegram_id))
         self._db.execute("INSERT INTO users (telegram_id, email, linked_at) VALUES (?, ?, ?) "
                          "ON CONFLICT(telegram_id) DO UPDATE SET email = excluded.email, linked_at = excluded.linked_at",
                          (telegram_id, email, datetime.now(timezone.utc).isoformat(timespec="seconds")))
         self._db.commit()
+        return displaced
 
     def unlink(self, telegram_id: int) -> None:
         self._db.execute("DELETE FROM users WHERE telegram_id = ?", (telegram_id,))

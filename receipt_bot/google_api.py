@@ -196,21 +196,14 @@ class GoogleStore:
     # --- access ---
 
     async def has_access(self, email: str) -> bool:
-        """Edit access shared with this person or their domain. "Anyone with the link" doesn't count:
-        the bot is public, so that would let in any Google account. Groups aren't expanded (see README)."""
+        """Edit access shared with this very person. Not "anyone with the link" (the bot is public) and not
+        a whole domain (a personal account can use a company address). Groups aren't expanded (see README)."""
         if time.monotonic() - self._permissions_at > PERMISSIONS_TTL:
             self._permissions = await self._list_permissions()
             self._permissions_at = time.monotonic()
         email = email.lower()
-        domain = email.rsplit("@", 1)[-1]
-        for p in self._permissions:
-            if p.get("role") not in EDIT_ROLES or p.get("deleted"):
-                continue
-            if p.get("type") == "user" and p.get("emailAddress", "").lower() == email:
-                return True
-            if p.get("type") == "domain" and p.get("domain", "").lower() == domain:
-                return True
-        return False
+        return any(p.get("type") == "user" and p.get("role") in EDIT_ROLES and not p.get("deleted")
+                   and p.get("emailAddress", "").lower() == email for p in self._permissions)
 
     async def _list_permissions(self) -> list[dict]:
         permissions, token = [], None

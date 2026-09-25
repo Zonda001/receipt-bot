@@ -8,19 +8,28 @@
 </head>
 <body>
 <h1>Privacy Policy — Receipt Bot</h1>
-<p><em>Last updated: 24 September 2026</em></p>
+<p><em>Last updated: 25 September 2026</em></p>
 
 <h2>What we collect</h2>
 <ul>
-<li><b>Google account email</b> — obtained via Google Sign-In (scopes <code>openid</code>, <code>email</code>) only to check whether you have access to your team's Google Sheet.</li>
-<li><b>Telegram user ID and display name</b> — to link your Telegram account to your Google email and to record who submitted a receipt.</li>
+<li><b>Google account email</b> — obtained via Google Sign-In (scopes <code>openid</code>, <code>email</code>).
+It is kept only if the account has edit access to the team's Google Sheet, and it is written into the Sheet row
+of every receipt you submit. Sign-in tokens are not stored.</li>
+<li><b>Telegram user ID and display name</b> — to link your Telegram account to your Google email and to record
+who submitted a receipt (also written into the Sheet row).</li>
 <li><b>Receipt photos and confirmed amounts</b> — that you send to the bot yourself.</li>
 </ul>
 
 <h2>How it is used</h2>
-<p>Receipt photos are stored in the team's Google Drive folder, and a row (date, sender, amount, link to the photo)
-is added to the team's Google Sheet. Photos are sent to an AI model provider solely to read the total amount.
-Data is not sold, shared for advertising, or used for any other purpose.</p>
+<p>To read the total amount, a downscaled copy of the photo is sent to an AI model provider:
+<b>Cloudflare Workers AI</b>, or <b>Groq</b> if Cloudflare is unavailable. Under their terms the data is not used to train
+models; providers may keep short-lived logs to prevent abuse.</p>
+<p>After you confirm the amount, the original photo is stored in the team's Google Drive folder, and a row
+(date added, receipt date, sender name and Telegram ID, Google email, amount, currency, link to the photo,
+whether the amount was typed in, receipt ID) is added to the team's Google Sheet.
+A photo sent <i>as a file</i> is stored as is, including its metadata (for example, location);
+a photo sent as a regular Telegram photo is recompressed by Telegram without it.</p>
+<p>Data is not sold, shared for advertising, or used for any other purpose.</p>
 
 <h2>Google user data</h2>
 <p>Receipt Bot's use of information received from Google APIs adheres to the
@@ -28,7 +37,7 @@ Data is not sold, shared for advertising, or used for any other purpose.</p>
 including the Limited Use requirements.</p>
 
 <h2>Retention and deletion</h2>
-<p>The link between your Telegram account and Google email is kept until you ask to remove it.
+<p>The link between your Telegram account and Google email is kept until you send /logout or ask to remove it.
 Receipts remain in the team's Sheet and Drive, managed by the team. To delete your data, contact the address below.</p>
 
 <h2>Contact</h2>

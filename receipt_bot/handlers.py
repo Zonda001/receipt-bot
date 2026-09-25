@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiohttp
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 from aiogram.filters import Command, CommandStart
 from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
@@ -29,6 +29,7 @@ from receipt_bot.google_api import (
 )
 from receipt_bot.recognition import (
     RATE_LIMIT_WAIT_MAX, NotAnImage, RateLimited, Recognition, RecognitionError, RecognizerChain, parse_amount,
+    validate_image,
 )
 from receipt_bot.storage import Users
 
@@ -42,6 +43,9 @@ MAX_FILE_BYTES = 10 * 1024 * 1024
 PENDING_TTL = 24 * 3600
 PHOTOS_PER_MINUTE = 20  # квитанції шлють альбомами по 9-10
 LOGINS_PER_MINUTE = 3
+LOGINS_GLOBAL_PER_MINUTE = 20
+REPLIES_PER_MINUTE = 10
+SAVES_PER_DAY = 100
 IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
 
@@ -150,6 +154,23 @@ class DailyQuota:
             self._used -= 1
 
 
+class SaveLimit:
+    """Записів на людину за добу: навіть з чужим кодом входу Drive власника не заб'ють."""
+
+    def __init__(self, per_day: int) -> None:
+        self._per_day = per_day
+        self._day = date.today()
+        self._used: dict[int, int] = defaultdict(int)
+
+    def take(self, user_id: int) -> bool:
+        if date.today() != self._day:
+            self._day, self._used = date.today(), defaultdict(int)
+        if self._used[user_id] >= self._per_day:
+            return False
+        self._used[user_id] += 1
+        return True
+
+
 def rate_limited_note(retry_after: float) -> str:
     if retry_after <= RATE_LIMIT_WAIT_MAX:
         return "Розпізнавання зараз перевантажене. Надішли фото ще раз за хвилину або введи суму вручну."
@@ -224,8 +245,9 @@ def now_local() -> datetime:
 
 
 def display_name(user) -> str:
-    name = " ".join(filter(None, [user.first_name, user.last_name])) or str(user.id)
-    return f"{name} (@{user.username})" if user.username else name
+    # Числовий id — бо ім'я людина пише собі сама.
+    name = " ".join(filter(None, [user.first_name, user.last_name])) or "без імені"
+    return f"{name} (@{user.username}, id {user.id})" if user.username else f"{name} (id {user.id})"
 
 
 async def edit_receipt(bot: Bot, item: Pending, text: str, markup: InlineKeyboardMarkup | None = None) -> None:
@@ -263,9 +285,10 @@ async def on_start(message: Message, bot: Bot, state: FSMContext, pending: Pendi
 
 @router.message(Command("login"))
 async def on_login(message: Message, users: Users, google: GoogleStore, login: GoogleLogin,
-                   login_limiter: RateLimiter, logins: dict[int, asyncio.Task]) -> None:
+                   login_limiter: RateLimiter, login_global: RateLimiter, logins: dict[int, asyncio.Task]) -> None:
     user_id = message.from_user.id
-    if not login_limiter.allow(user_id):
+    # Загальна стеля теж: кожен /login — запит до Google від нашого OAuth-клієнта.
+    if not login_limiter.allow(user_id) or not login_global.allow(0):
         await message.answer("Забагато спроб входу. Зачекай хвилину.")
         return
     try:
@@ -300,11 +323,22 @@ async def finish_login(message: Message, code, users: Users, google: GoogleStore
     finally:
         if logins.get(user_id) is asyncio.current_task():
             logins.pop(user_id, None)
-    users.link(user_id, email)
+    try:
+        allowed = await google.has_access(email)
+    except GoogleError as e:
+        log.warning("access check failed: %s", e)
+        return await say(message, "Не вдалося перевірити доступ до таблиці. Спробуй /login ще раз за хвилину.")
+    if not allowed:  # email людей без доступу не зберігаємо
+        return await say(message, f"Акаунт {email} не має доступу на редагування таблиці. "
+                                  "Попроси власника відкрити доступ і тоді /login ще раз.")
+    for other in users.link(user_id, email):
+        # Один email — один Telegram. Якщо код входу підсунули, справжній власник про це дізнається.
+        with suppress(TelegramAPIError):
+            await message.bot.send_message(other, f"⚠️ Акаунт {email} щойно підключили до іншого Telegram, "
+                                                  "а тебе від нього відключено. Якщо це не ти — /login і скажи власнику таблиці.")
     log.info("user %s linked a Google account", user_id)
     # Ім'я акаунта — завжди: якщо код підсунули, людина побачить чужий email.
-    problem = await access_problem(user_id, users, google)
-    await say(message, f"✅ Ти увійшов як {email}.\n" + (problem or "Доступ до таблиці є — надсилай фото чеків."))
+    await say(message, f"✅ Ти увійшов як {email}. Доступ до таблиці є — надсилай фото чеків.")
 
 
 async def say(message: Message, text: str) -> None:
@@ -325,6 +359,10 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, recognizer: Re
                    pending: PendingStore, limiter: RateLimiter, quota: DailyQuota,
                    users: Users, google: GoogleStore) -> None:
     user_id = message.from_user.id
+    if not limiter.allow(user_id):  # до перевірки доступу: інакше незнайомці не обмежені зовсім
+        if users.email(user_id):
+            await message.answer("Забагато чеків за хвилину. Зачекай трохи і надішли ще раз.")
+        return
     if problem := await access_problem(user_id, users, google):
         await message.answer(problem)
         return
@@ -342,13 +380,21 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, recognizer: Re
     if file.file_size and file.file_size > MAX_FILE_BYTES:
         await message.answer("Файл завеликий (більше 10 МБ). Надішли звичайне фото чека.")
         return
-    if not limiter.allow(user_id):
-        await message.answer("Забагато чеків за хвилину. Зачекай трохи і надішли ще раз.")
-        return
 
     # Відповідь цитує фото: якщо чеків кілька, видно, яка сума до якого.
-    status = await message.answer(
-        "Розпізнаю…", reply_parameters=ReplyParameters(message_id=message.message_id, allow_sending_without_reply=True))
+    reply_to = ReplyParameters(message_id=message.message_id, allow_sending_without_reply=True)
+    try:
+        status = await message.answer("Розпізнаю…", reply_parameters=reply_to)
+    except TelegramRetryAfter as e:  # Telegram просить почекати (флуд) — одна спроба після паузи
+        await asyncio.sleep(min(e.retry_after, 30))
+        try:
+            status = await message.answer("Розпізнаю…", reply_parameters=reply_to)
+        except TelegramAPIError:
+            log.warning("can't reply to a photo: still rate limited by Telegram")
+            return
+    except TelegramAPIError as e:
+        log.warning("can't reply to a photo: %s", type(e).__name__)
+        return
 
     try:
         image = await bot.download(file.file_id)
@@ -409,11 +455,11 @@ async def reply(bot: Bot, item: Pending, text: str) -> None:
 
 
 async def finalize(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: bool,
-                   users: Users, google: GoogleStore) -> None:
+                   users: Users, google: GoogleStore, saves: SaveLimit) -> None:
     """Викликати одразу після item.status = "processing". Записує чек або повертає його в pending з кнопками."""
     shown = fmt(amount, item.recognition.currency) + (" (введено вручну)" if manual else "")
     try:
-        link = await save(bot, rid, item, amount, manual, users, google)
+        link = await save(bot, rid, item, amount, manual, users, google, saves)
     except NotSaved as e:
         item.status = "pending"
         await edit_receipt(bot, item, *result_view(rid, item.recognition, item.note))
@@ -425,7 +471,7 @@ async def finalize(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: b
 
 
 async def save(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: bool, users: Users,
-               google: GoogleStore) -> str:
+               google: GoogleStore, saves: SaveLimit) -> str:
     """Доступ (ще раз: його могли забрати) -> фото з Telegram -> Drive -> Sheets. Повертає посилання на фото."""
     email = users.email(item.user_id)
     if email is None:
@@ -433,16 +479,21 @@ async def save(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: bool,
     try:
         if not await google.has_access(email):
             raise NotSaved(f"Акаунт {email} більше не має доступу до таблиці.")
-        photo = await bot.download(item.file_id)
+        if not saves.take(item.user_id):
+            raise NotSaved(f"Ліміт {SAVES_PER_DAY} записів на добу вичерпано.")
+        photo = (await bot.download(item.file_id)).read()
+        await validate_image(photo)  # у Drive — лише справжнє фото, навіть якщо розпізнавання пропустили
         now = now_local()
         rec = item.recognition
         row = ReceiptRow(receipt_id=rid, added_at=now.strftime("%Y-%m-%d %H:%M"),
                          receipt_date=rec.receipt_date.isoformat() if rec.receipt_date else "",
                          sender=item.sender, email=email, amount=float(amount), currency=rec.currency, manual=manual)
         name = f"{now:%Y-%m-%d %H-%M} {amount} {rec.currency} {rid}.{EXTENSIONS.get(item.mime, 'jpg')}"
-        return await google.save_receipt(photo.read(), item.mime, name, row)
+        return await google.save_receipt(photo, item.mime, name, row)
     except NotSaved:
         raise
+    except NotAnImage as e:
+        raise NotSaved("Файл не відкривається як фото — не записую.") from e
     except GoogleUnsure as e:
         log.warning("receipt %s: outcome unknown: %s", rid, e)
         raise NotSaved(f"Google не відповів вчасно — не впевнений, чи чек записався. "
@@ -460,7 +511,7 @@ async def save(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: bool,
 
 @router.callback_query(ReceiptAction.filter())
 async def on_action(query: CallbackQuery, callback_data: ReceiptAction, bot: Bot, state: FSMContext,
-                    pending: PendingStore, users: Users, google: GoogleStore) -> None:
+                    pending: PendingStore, users: Users, google: GoogleStore, saves: SaveLimit) -> None:
     rid = callback_data.rid
     item = pending.get(rid)
     if item is None:
@@ -491,7 +542,7 @@ async def on_action(query: CallbackQuery, callback_data: ReceiptAction, bot: Bot
         with suppress(TelegramAPIError):
             await query.answer()
         await edit_receipt(bot, item, f"Сума: {fmt(amount, item.recognition.currency)} — записую…")
-        await finalize(bot, rid, item, amount, False, users, google)
+        await finalize(bot, rid, item, amount, False, users, google, saves)
     elif callback_data.action == "manual":
         await release_manual(bot, state, pending, new_rid=rid)
         with suppress(TelegramAPIError):
@@ -519,7 +570,7 @@ async def on_action(query: CallbackQuery, callback_data: ReceiptAction, bot: Bot
 
 @router.message(ManualAmount.waiting, F.text)
 async def on_manual_amount(message: Message, bot: Bot, state: FSMContext, pending: PendingStore,
-                           users: Users, google: GoogleStore) -> None:
+                           users: Users, google: GoogleStore, saves: SaveLimit) -> None:
     rid = (await state.get_data()).get("rid")
     item = pending.get(rid)
     if item is None or item.user_id != message.from_user.id:
@@ -538,11 +589,13 @@ async def on_manual_amount(message: Message, bot: Bot, state: FSMContext, pendin
     await state.clear()
     log.info("receipt %s: manual amount", rid)
     await edit_receipt(bot, item, f"Сума: {fmt(amount, item.recognition.currency)} (введено вручну) — записую…")
-    await finalize(bot, rid, item, amount, True, users, google)
+    await finalize(bot, rid, item, amount, True, users, google, saves)
 
 
 @router.message()
-async def on_other(message: Message) -> None:
+async def on_other(message: Message, chatter: RateLimiter) -> None:
+    if not chatter.allow(message.from_user.id):
+        return  # на спам не відповідаємо: у Telegram загальний ліміт відправки
     if message.text and parse_amount(message.text) is not None:
         await message.answer("Щоб записати суму, натисни «✏️ Ввести вручну» під потрібним чеком. "
                              "Якщо кнопок уже нема — надішли фото чека ще раз.")

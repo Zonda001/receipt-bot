@@ -110,7 +110,8 @@ PERMS = {"permissions": [
 
 @pytest.mark.parametrize("email, ok", [
     ("owner@gmail.com", True), ("by@trustee.io", True), ("reader@gmail.com", False),
-    ("anyone@team.ua", True), ("stranger@gmail.com", False),
+    ("anyone@team.ua", False),  # доступ на домен не рахуємо: особистий акаунт може мати корпоративну адресу
+    ("stranger@gmail.com", False),
 ])
 def test_access_needs_edit_rights(files, email, ok):
     async def scenario():
@@ -360,3 +361,34 @@ def test_device_polling_survives_a_5xx(files):
         assert await login.wait_for_email(g.DeviceCode("dc", "X", "u", 1800, 5)) == "d@gmail.com"
 
     asyncio.run(scenario())
+
+
+# --- ревю всього репо 91fe2ea ---
+
+def test_one_email_one_telegram(tmp_path):
+    users = Users(str(tmp_path / "bot.db"))
+    assert users.link(1, "a@gmail.com") == []
+    assert users.link(2, "a@gmail.com") == [1]  # перший акаунт відключено — і йому про це скажуть
+    assert users.email(1) is None and users.email(2) == "a@gmail.com"
+    assert users.link(2, "a@gmail.com") == []  # повторний вхід тим самим акаунтом нікого не зачіпає
+    users.close()
+
+
+def test_save_limit_per_user():
+    from receipt_bot.handlers import SaveLimit
+    limit = SaveLimit(2)
+    assert limit.take(1) and limit.take(1) and not limit.take(1)
+    assert limit.take(2)  # в іншої людини свій ліміт
+
+
+def test_sender_has_numeric_id():
+    from types import SimpleNamespace
+    from receipt_bot.handlers import display_name
+    assert display_name(SimpleNamespace(id=42, first_name="Admin", last_name=None, username=None)) == "Admin (id 42)"
+    assert "id 42" in display_name(SimpleNamespace(id=42, first_name="A", last_name="B", username="ab"))
+
+
+def test_non_image_is_never_uploaded():
+    from receipt_bot.recognition import NotAnImage, validate_image
+    with pytest.raises(NotAnImage):
+        asyncio.run(validate_image(b"\x00" * 1000))

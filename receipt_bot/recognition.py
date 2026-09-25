@@ -501,3 +501,9 @@ class RecognizerChain:
             raise soonest
         finally:
             self.in_flight -= 1
+
+
+async def validate_image(data: bytes) -> None:
+    """NotAnImage, якщо це не фото. Для запису в Drive без розпізнавання (ліміт вичерпано, ручна сума)."""
+    async with _IMAGE_SLOTS:
+        await asyncio.to_thread(prepare_image, data)
