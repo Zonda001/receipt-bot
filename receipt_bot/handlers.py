@@ -12,16 +12,18 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiohttp
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command, CommandStart
 from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, ReplyParameters
+from aiogram.types import BotCommand, CallbackQuery, CopyTextButton, InlineKeyboardMarkup, Message, ReplyParameters
+from aiogram.utils.formatting import Code, Text
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from receipt_bot.google_api import (
@@ -58,6 +60,11 @@ HELP_TEXT = (
 )
 MANUAL_HINT = "Натисни «✏️ Ввести вручну» нижче."
 LOGIN_FIRST = "Спершу увійди через Google: /login"
+BOT_COMMANDS = [
+    BotCommand(command="login", description="Увійти через Google"),
+    BotCommand(command="logout", description="Вийти"),
+    BotCommand(command="help", description="Як це працює"),
+]
 
 try:
     KYIV = ZoneInfo("Europe/Kyiv")
@@ -300,12 +307,45 @@ async def on_login(message: Message, users: Users, google: GoogleStore, login: G
     # Скасувати старий і стати на його місце — без await між ними, інакше два /login поспіль лишать обидва.
     if old := logins.pop(user_id, None):
         old.cancel()
-    logins[user_id] = asyncio.create_task(finish_login(message, code, users, google, login, logins))
-    await say(message,
-              f"1. Відкрий {code.url}\n"
-              f"2. Введи код: {code.user_code}\n"
-              "3. Обери Google-акаунт, який має доступ до таблиці.\n\n"
-              f"Код дійсний {code.expires_in // 60} хв. Я напишу, щойно вхід пройде.")
+    task = asyncio.create_task(finish_login(message, code, users, google, login, logins))
+    logins[user_id] = task
+    if not await send_login_prompt(message, code):
+        # Код ніхто не побачив — нема сенсу пів години опитувати Google.
+        if logins.get(user_id) is task:
+            logins.pop(user_id)
+        task.cancel()
+
+
+def login_prompt(code) -> dict:
+    # Код моноширинним: на клієнтах без кнопки копіювання його копіює тап.
+    text = Text(f"1. Відкрий {code.url}\n",
+                "2. Введи код: ", Code(code.user_code), "\n",
+                "3. Обери Google-акаунт, який має доступ до таблиці.\n\n",
+                f"Код дійсний {code.expires_in // 60} хв. Я напишу, щойно вхід пройде.")
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📋 Скопіювати код", copy_text=CopyTextButton(text=code.user_code))
+    if urlparse(code.url).scheme == "https":  # іншу адресу Telegram однаково відкине
+        kb.button(text="🔗 Відкрити Google", url=code.url)
+    return {**text.as_kwargs(), "reply_markup": kb.as_markup()}
+
+
+async def send_login_prompt(message: Message, code) -> bool:
+    """Код входу з кнопками, а якщо Telegram не прийняв — голим текстом. False — не дійшов зовсім."""
+    prompt = login_prompt(code)
+    try:
+        await message.answer(**prompt)
+        return True
+    except TelegramBadRequest as e:
+        log.warning("login prompt rejected, sending plain text: %s", e.message)
+    except TelegramAPIError as e:
+        log.warning("login prompt not sent: %s", type(e).__name__)
+        return False
+    try:
+        await message.answer(prompt["text"], parse_mode=None)
+        return True
+    except TelegramAPIError as e:
+        log.warning("login prompt not sent: %s", type(e).__name__)
+        return False
 
 
 async def finish_login(message: Message, code, users: Users, google: GoogleStore, login: GoogleLogin,
@@ -329,6 +369,7 @@ async def finish_login(message: Message, code, users: Users, google: GoogleStore
         log.warning("access check failed: %s", e)
         return await say(message, "Не вдалося перевірити доступ до таблиці. Спробуй /login ще раз за хвилину.")
     if not allowed:  # email людей без доступу не зберігаємо
+        log.info("user %s signed in without sheet access", user_id)  # без email, лише слід для скарг
         return await say(message, f"Акаунт {email} не має доступу на редагування таблиці. "
                                   "Попроси власника відкрити доступ і тоді /login ще раз.")
     for other in users.link(user_id, email):

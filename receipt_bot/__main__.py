@@ -5,12 +5,14 @@ from urllib.parse import urlparse
 
 import httpx
 from aiogram import Bot, Dispatcher
+from aiogram.exceptions import TelegramAPIError
+from aiogram.types import BotCommandScopeAllPrivateChats
 
 from receipt_bot.config import Settings
 from receipt_bot.google_api import GoogleLogin, GoogleStore
 from receipt_bot.handlers import (
-    LOGINS_GLOBAL_PER_MINUTE, LOGINS_PER_MINUTE, PHOTOS_PER_MINUTE, REPLIES_PER_MINUTE, SAVES_PER_DAY, DailyQuota,
-    PendingStore, RateLimiter, SaveLimit, router,
+    BOT_COMMANDS, LOGINS_GLOBAL_PER_MINUTE, LOGINS_PER_MINUTE, PHOTOS_PER_MINUTE, REPLIES_PER_MINUTE, SAVES_PER_DAY,
+    DailyQuota, PendingStore, RateLimiter, SaveLimit, router,
 )
 from receipt_bot.recognition import Recognizer, RecognizerChain
 from receipt_bot.storage import Users
@@ -104,10 +106,15 @@ async def main() -> None:
     dp.include_router(router)
 
     try:
+        try:  # меню «/» у клієнті; без нього бот теж працює
+            await bot.set_my_commands(BOT_COMMANDS, scope=BotCommandScopeAllPrivateChats(), request_timeout=10)
+        except TelegramAPIError as e:
+            log.warning("can't set the command menu: %s", type(e).__name__)
         await dp.start_polling(bot, tasks_concurrency_limit=50)  # стеля на одночасні оновлення
     finally:
         await recognizer.close()
         await google_http.aclose()
+        await bot.session.close()  # polling закриває сам, але до нього могли й не дійти
         users.close()
 
 
