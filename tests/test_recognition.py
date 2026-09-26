@@ -139,7 +139,7 @@ def test_gross_and_card_labels_are_not_excluded(label):
 
 
 def test_labels_are_cleaned_of_invisible_and_bidi_chars():
-    rlo, zwsp, newline = chr(0x202E), chr(0x200B), chr(10)  # зміна напрямку тексту, невидимий пробіл, перенос
+    rlo, zwsp, newline = chr(0x202E), chr(0x200B), chr(10)  # text direction change, invisible space, line break
     dirty = rlo + "ДО" + zwsp + " СПЛАТИ" + newline + "  та ще дуже довгий хвіст мітки"
     label = normalize(answer(total=None, candidates=[(dirty, 10)])).candidates[0].label
     assert rlo not in label and zwsp not in label and newline not in label
@@ -180,7 +180,7 @@ def test_vat_with_attached_rate_or_bare_incl_is_dropped(label):
 def test_cash_keyword_past_button_width_is_still_detected():
     rec = normalize(answer(total=500, candidates=[("ДО СПЛАТИ", 347.5), ("Отримано від покупця готівкою", 500)]))
     assert not rec.has_total
-    assert [c.amount for c in rec.candidates] == [Decimal("347.50")]  # внесена готівка не пропонується взагалі
+    assert [c.amount for c in rec.candidates] == [Decimal("347.50")]  # cash tendered is never offered at all
 
 
 def test_cap_applies_after_dropping_vat_rows():

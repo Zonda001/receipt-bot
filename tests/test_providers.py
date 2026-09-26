@@ -1,4 +1,4 @@
-"""Комісія банку, мітки інших мов, черга до провайдера і запасний провайдер."""
+"""Bank fees, labels in other languages, the provider queue and the fallback provider."""
 import asyncio
 import io
 from decimal import Decimal
@@ -26,7 +26,7 @@ def jpeg() -> bytes:
     return buf.getvalue()
 
 
-# --- комісія ---
+# --- fee ---
 
 def test_bank_receipt_offers_sum_and_sum_with_fee_but_not_bare_fee():
     rec = normalize(answer(total=477.42, candidates=[("Сума", 477.42), ("Комісія", 5.00)]))
@@ -55,7 +55,7 @@ def test_fee_labels(label, expected):
     assert is_fee(label) is expected
 
 
-# --- інші мови ---
+# --- other languages ---
 
 @pytest.mark.parametrize("label", ["PTU A 23%", "SUMA PTU", "RESZTA", "GOTÓWKA", "Cash", "Change"])
 def test_polish_and_english_tax_cash_change_are_dropped(label):
@@ -68,20 +68,20 @@ def test_polish_and_english_totals_are_kept(label):
 
 
 def test_schema_asks_for_amounts_before_the_verdict():
-    # Порядок полів — не косметика: з is_receipt першим модель казала "не чек" на 19 із 24 справжніх документів.
+    # Field order isn't cosmetic: with is_receipt first the model said "not a receipt" on 19 of 24 real documents.
     assert RESPONSE_SCHEMA["required"][0] == "candidates" and RESPONSE_SCHEMA["required"][-1] == "is_receipt"
     assert list(RESPONSE_SCHEMA["properties"])[-1] == "is_receipt"
 
 
-# --- тексти про ліміт ---
+# --- limit messages ---
 
 def test_rate_limited_note_is_honest_about_the_wait():
     assert "за хвилину" in rate_limited_note(30)
-    assert "19 хв" in rate_limited_note(1087)   # денний ліміт Groq: "try again in 18m6s"
+    assert "19 хв" in rate_limited_note(1087)   # Groq daily limit: "try again in 18m6s"
     assert "6 год" in rate_limited_note(20000)
 
 
-# --- черга і ліміти провайдера ---
+# --- queue and provider limits ---
 
 def ok_body():
     return {"choices": [{"message": {"content": answer(total=10, candidates=[("СУМА", 10)]).model_dump_json()}}]}
@@ -95,7 +95,7 @@ def with_transport(rec: Recognizer, handler) -> Recognizer:
 def test_budget_wait_follows_ratelimit_headers():
     rec = Recognizer("http://x", "m", "k")
     rec._remember_budget(httpx.Headers({"x-ratelimit-remaining-tokens": "1000", "x-ratelimit-limit-tokens": "8000"}))
-    # бракує 1600 токенів, квота відновлюється по 8000/60 на секунду -> ~12 с
+    # 1600 tokens short, the quota refills at 8000/60 per second -> ~12 s
     assert 11 < rec._budget_wait() < 12.5
     rec._remember_budget(httpx.Headers({"x-ratelimit-remaining-tokens": "8000", "x-ratelimit-limit-tokens": "8000"}))
     assert rec._budget_wait() == 0
@@ -115,14 +115,14 @@ def test_long_429_blocks_provider_without_further_requests():
         assert first.value.retry_after == 1087 and not first.value.spent
         with pytest.raises(RateLimited):
             await rec.recognize_prepared(jpeg())
-        assert len(calls) == 1  # другий раз провайдера навіть не питали
+        assert len(calls) == 1  # the second time the provider wasn't even asked
         assert rec.blocked_for() > 1000
         await rec.close()
 
     asyncio.run(scenario())
 
 
-# --- запасний провайдер ---
+# --- fallback provider ---
 
 def test_chain_uses_fallback_when_primary_is_out_of_daily_quota():
     async def scenario():
@@ -171,7 +171,7 @@ def test_chain_prefers_real_error_over_rate_limit():
         fallback = with_transport(Recognizer("http://x", "m", "k"), lambda r: httpx.Response(400, text="bad request"))
         with pytest.raises(RecognitionError) as err:
             await RecognizerChain(primary, fallback).recognize(jpeg())
-        assert not isinstance(err.value, RateLimited)  # запасний відповів помилкою: "спробуй пізніше" було б неправдою
+        assert not isinstance(err.value, RateLimited)  # the fallback answered with an error: "try later" would be a lie
 
     asyncio.run(scenario())
 
@@ -209,10 +209,10 @@ def test_fallback_extra_body_is_sent():
     asyncio.run(scenario())
 
 
-# --- знахідки ревю 7714ecc ---
+# --- review findings 7714ecc ---
 
 @pytest.mark.parametrize("rows, total, expected", [
-    # у "Разом до сплати" комісія вже є
+    # "Разом до сплати" already includes the fee
     ([("Сума платежу", 500), ("Комісія", 10), ("Разом до сплати", 510)], 510, ["510.00", "500.00"]),
     ([("Сума платежу", 500), ("Комісія", 10), ("Разом до сплати", 510)], 500, ["500.00", "510.00"]),
     ([("Service fee", 50), ("TOTAL", 550)], 550, ["550.00"]),
@@ -242,7 +242,7 @@ def test_real_error_wins_over_fallback_rate_limit():
                                   lambda r: httpx.Response(429, headers={"retry-after": "1087"}))
         with pytest.raises(RecognitionError) as err:
             await RecognizerChain(primary, fallback).recognize(jpeg())
-        assert not isinstance(err.value, RateLimited)  # основний живий — не кажемо "ліміт на 19 хв"
+        assert not isinstance(err.value, RateLimited)  # the primary is alive: don't say "limit for 19 min"
 
     asyncio.run(scenario())
 
@@ -264,7 +264,7 @@ def test_down_primary_is_skipped_for_a_while(monkeypatch):
         assert (await chain.recognize(jpeg())).total == Decimal("10.00")
         calls = len(primary_calls)
         assert (await chain.recognize(jpeg())).total == Decimal("10.00")
-        assert len(primary_calls) == calls  # друге фото — одразу в запасний
+        assert len(primary_calls) == calls  # the second photo goes straight to the fallback
 
     monkeypatch.setattr(recognition.asyncio, "sleep", no_sleep)
     asyncio.run(scenario())
@@ -274,7 +274,7 @@ def test_down_primary_is_skipped_for_a_while(monkeypatch):
 def test_retry_after_from_provider_is_clamped(value):
     e = RateLimited(value)
     assert 0 <= e.retry_after <= 24 * 3600
-    assert rate_limited_note(e.retry_after)  # не падає
+    assert rate_limited_note(e.retry_after)  # doesn't crash
 
 
 def test_queue_is_capped():

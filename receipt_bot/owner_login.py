@@ -1,6 +1,6 @@
-"""Одноразовий вхід власника Drive-папки: зберігає refresh-токен, яким бот вантажить фото.
+"""One-time sign-in of the Drive folder owner: saves the refresh token the bot uploads photos with.
 
-Запуск на сервері, з теки бота: python -m receipt_bot.owner_login
+Run on the server, from the bot directory: python -m receipt_bot.owner_login
 """
 import asyncio
 import json
@@ -21,7 +21,7 @@ FOLDER_NAME = "Чеки (бот)"
 
 
 class OwnerSettings(BaseSettings):
-    # Лише те, що потрібно тут: команду запускають, коли решта .env може бути ще порожня.
+    # Only what this command needs: it runs when the rest of .env may still be empty.
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore",
                                       hide_input_in_errors=True)
 
@@ -31,7 +31,7 @@ class OwnerSettings(BaseSettings):
 
 
 def save_token(path: str, refresh_token: str, scope: str) -> None:
-    # mkstemp дає файл 600 поруч, потім заміна: збій посередині не зіпсує робочий токен.
+    # mkstemp makes a 600 file next to the target, then a rename: a crash halfway can't spoil the working token.
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)), prefix=".owner-token-")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -43,7 +43,7 @@ def save_token(path: str, refresh_token: str, scope: str) -> None:
 
 
 async def ensure_folder(http: httpx.AsyncClient, access_token: str, folder_id: str, show) -> None:
-    # drive.file бачить лише створене застосунком, тож папку, зроблену вручну в Drive, бот не побачить.
+    # drive.file only sees what the app created, so the bot can't see a folder made by hand in Drive.
     headers = {"Authorization": f"Bearer {access_token}"}
     if not folder_id:
         r = await _call(http, "drive folder", "POST", f"{DRIVE_URL}/files", params={"fields": "id"},
@@ -55,13 +55,13 @@ async def ensure_folder(http: httpx.AsyncClient, access_token: str, folder_id: s
                         params={"fields": "name,mimeType,trashed,ownedByMe"}, headers=headers)
         folder = _json(r, "drive folder")
     except GoogleUnsure:
-        raise  # збій мережі — не привід створювати нову папку
+        raise  # a network blip is no reason to create a new folder
     except GoogleError as e:
         raise GoogleError(f"{e}: this account doesn't see DRIVE_FOLDER_ID; sign in as the folder owner "
                           "or clear DRIVE_FOLDER_ID to create a new folder") from e
     if folder.get("mimeType") != FOLDER_MIME or folder.get("trashed"):
         raise GoogleError("DRIVE_FOLDER_ID is not a folder or is in the trash")
-    if not folder.get("ownedByMe"):  # папкою діляться з командою: бачити її ще не означає володіти
+    if not folder.get("ownedByMe"):  # the folder is shared with the team: seeing it doesn't mean owning it
         raise GoogleError("this account is not the owner of DRIVE_FOLDER_ID: sign in as the folder owner")
     show(f"Папка: «{folder.get('name')}».")
 
@@ -77,17 +77,18 @@ async def run(client_file: str, token_file: str, http: httpx.AsyncClient, show=p
     if not tokens.get("refresh_token"):
         raise GoogleError("device token: no refresh_token")
     scope = tokens.get("scope", "")
-    if DRIVE_FILE not in scope.split():  # галочку на доступ до Drive можна зняти на екрані згоди
+    if DRIVE_FILE not in scope.split():  # the Drive checkbox can be unticked on the consent screen
         raise GoogleError("drive.file was not granted: run again and allow access to files")
     email = await login.email(tokens["access_token"])
     show(f"Увійшов як {email}.")
-    await ensure_folder(http, tokens["access_token"], folder_id, show)  # до збереження: чужий акаунт не затре токен
+    # Before saving: a wrong account must not overwrite the working token.
+    await ensure_folder(http, tokens["access_token"], folder_id, show)
     save_token(token_file, tokens["refresh_token"], scope)
     return email
 
 
 async def main() -> None:
-    if getattr(os, "geteuid", lambda: -1)() == 0:  # токен root'а бот від ubuntu не прочитає
+    if getattr(os, "geteuid", lambda: -1)() == 0:  # the bot runs as ubuntu and can't read a root-owned token
         raise SystemExit("Запусти від користувача бота, не через sudo.")
     settings = OwnerSettings()
     async with httpx.AsyncClient(timeout=30) as http:

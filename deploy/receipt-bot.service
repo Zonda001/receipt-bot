@@ -10,13 +10,13 @@ ExecStart=/home/ubuntu/receipt-bot/.venv/bin/python -m receipt_bot
 Restart=on-failure
 RestartSec=5
 
-# Мінімум прав: код і секрети лише читаються, писати можна тільки в data/.
+# Least privilege: code and secrets are read-only, only data/ is writable.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/home/ubuntu/receipt-bot/data
 PrivateTmp=true
-# Якщо колись знайдеться діра в розборі картинок — щоб з процесу бота не вийти далі.
+# If image parsing ever has a hole, the bot process is a dead end.
 UMask=0077
 MemoryMax=1200M
 CapabilityBoundingSet=

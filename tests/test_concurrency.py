@@ -1,4 +1,4 @@
-"""Гонки, які з'являються лише при паралельній обробці натискань (aiogram так і працює)."""
+"""Races that only show up when taps are handled concurrently (which is how aiogram works)."""
 import asyncio
 import io
 
@@ -12,7 +12,7 @@ from receipt_bot.recognition import RateLimited, Recognition, Recognizer, Trunca
 
 
 class SlowBot:
-    """edit_message_text висить, доки тест не відпустить: імітує мережевий await."""
+    """edit_message_text hangs until the test releases it: mimics a network await."""
 
     def __init__(self) -> None:
         self.gate = asyncio.Event()
@@ -27,14 +27,14 @@ def test_fast_manual_taps_on_two_receipts_keep_the_last_one():
         pending = PendingStore()
         old = pending.add(Pending(user_id=1, file_id="f", recognition=Recognition(is_receipt=True),
                                   created=0, chat_id=1, msg_id=1))
-        pending._items[old].created = float("inf")  # не вичищати за TTL
+        pending._items[old].created = float("inf")  # don't evict by TTL
         await state.update_data(rid=old)
         bot = SlowBot()
 
         tap_a = asyncio.create_task(release_manual(bot, state, pending, new_rid="A"))
-        await asyncio.sleep(0)  # A стоїть на відновленні кнопок старого чека
+        await asyncio.sleep(0)  # A is waiting to restore the old receipt's buttons
         assert (await state.get_data())["rid"] == "A"
-        await release_manual(bot, state, pending, new_rid="B")  # другий тап, поки A чекає Telegram
+        await release_manual(bot, state, pending, new_rid="B")  # second tap while A waits for Telegram
         bot.gate.set()
         await tap_a
         assert (await state.get_data())["rid"] == "B"

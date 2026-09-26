@@ -22,9 +22,9 @@ log = logging.getLogger("receipt_bot")
 
 
 class RedactingFormatter(logging.Formatter):
-    """Замінює секрети на *** у готовому рядку журналу — разом із трейсбеками сторонніх бібліотек.
+    """Replaces secrets with *** in the finished log line, tracebacks from third-party libraries included.
 
-    Наприклад, aiohttp кладе в текст помилки URL файлу Telegram, а він містить токен бота.
+    For example, aiohttp puts the Telegram file URL, which contains the bot token, into its error text.
     """
 
     def __init__(self, secrets: list[str]) -> None:
@@ -42,7 +42,7 @@ PROTECTED_FIELDS = {"model", "messages", "response_format"}
 
 
 def provider_name(base_url: str) -> str:
-    """https://api.groq.com/... -> "groq" — для журналу."""
+    """https://api.groq.com/... -> "groq", for the journal."""
     host = urlparse(base_url).hostname or "llm"
     parts = host.split(".")
     return parts[-2] if len(parts) >= 2 else host
@@ -73,7 +73,7 @@ async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     for handler in logging.getLogger().handlers:
         handler.setFormatter(RedactingFormatter([bot_token, llm_key, fallback_key]))
-    # httpx на INFO пише кожен URL запиту; ключі в заголовках, але шуму в журналі не треба.
+    # At INFO httpx logs every request URL; keys are in headers, but the journal doesn't need the noise.
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
     primary = make_recognizer(settings.llm_base_url, settings.llm_model, llm_key,
@@ -106,15 +106,15 @@ async def main() -> None:
     dp.include_router(router)
 
     try:
-        try:  # меню «/» у клієнті; без нього бот теж працює
+        try:  # the "/" menu in the client; the bot works without it too
             await bot.set_my_commands(BOT_COMMANDS, scope=BotCommandScopeAllPrivateChats(), request_timeout=10)
         except TelegramAPIError as e:
             log.warning("can't set the command menu: %s", type(e).__name__)
-        await dp.start_polling(bot, tasks_concurrency_limit=50)  # стеля на одночасні оновлення
+        await dp.start_polling(bot, tasks_concurrency_limit=50)  # cap on concurrent updates
     finally:
         await recognizer.close()
         await google_http.aclose()
-        await bot.session.close()  # polling закриває сам, але до нього могли й не дійти
+        await bot.session.close()  # polling closes it itself, but we may never have got that far
         users.close()
 
 

@@ -19,15 +19,15 @@ def test_quota_give_back_never_below_zero():
 
 
 def test_settings_errors_do_not_print_values(tmp_path, monkeypatch):
-    # Коротше 50 символів: довші значення pydantic і так обрізає, а коротке без виправлення друкується повністю.
-    # Навмисно не у форматі токена Telegram, щоб сканери секретів не плутали тест зі справжнім витоком.
+    # Under 50 chars: pydantic truncates longer values anyway; a short one would print in full without the fix.
+    # Deliberately not shaped like a Telegram token, so secret scanners don't mistake the test for a real leak.
     fake_token = "not-a-real-secret-" + "q" * 20
-    (tmp_path / ".env").write_text(f"BOT_TOKEM={fake_token}\n", encoding="utf-8")  # опечатка в назві ключа
+    (tmp_path / ".env").write_text(f"BOT_TOKEM={fake_token}\n", encoding="utf-8")  # typo in the key name
     monkeypatch.chdir(tmp_path)
     with pytest.raises(ValidationError) as err:
         Settings()
     assert fake_token not in str(err.value)
-    assert "bot_tokem" in str(err.value)  # назва поля лишається — видно, що виправити
+    assert "bot_tokem" in str(err.value)  # the field name stays, so you can see what to fix
 
 
 @pytest.mark.parametrize("url, name", [
@@ -41,7 +41,7 @@ def test_provider_name_comes_from_the_host(url, name):
 
 
 def test_extra_body_json_survives_dotenv(tmp_path, monkeypatch):
-    # Значення з лапками й дужками без обгортки в лапки: dotenv має віддати його як є, інакше json.loads впаде на старті.
+    # Quotes and braces with no wrapping quotes: dotenv must return it as is, or json.loads fails at startup.
     (tmp_path / ".env").write_text(
         "BOT_TOKEN=t\nGOOGLE_SA_KEY_FILE=a\nGOOGLE_OAUTH_CLIENT_FILE=b\nSHEET_ID=c\nGOOGLE_OWNER_TOKEN_FILE=d\n"
         "DRIVE_FOLDER_ID=e\nLLM_BASE_URL=https://api.cloudflare.com/x/ai/v1\nLLM_MODEL=m\nLLM_API_KEY=k\n"
@@ -52,7 +52,7 @@ def test_extra_body_json_survives_dotenv(tmp_path, monkeypatch):
     rec = make_recognizer(s.llm_base_url, s.llm_model, "k", s.llm_reasoning_effort, s.llm_extra_body)
     body = rec._request_body(b"jpeg")
     assert body["chat_template_kwargs"] == {"enable_thinking": False}
-    assert "reasoning_effort" not in body  # чужий для Cloudflare параметр не надсилається
+    assert "reasoning_effort" not in body  # a parameter Cloudflare doesn't know is not sent
     assert rec.name == "cloudflare"
 
 
@@ -72,7 +72,7 @@ def test_login_prompt_code_is_copyable_and_google_opens():
 
 
 def e_text(text: str, entity) -> str:
-    # Telegram рахує зсуви в UTF-16.
+    # Telegram counts offsets in UTF-16.
     raw = text.encode("utf-16-le")
     return raw[entity.offset * 2:(entity.offset + entity.length) * 2].decode("utf-16-le")
 
@@ -84,7 +84,7 @@ def test_command_menu_matches_handlers():
 
     handled = {c for h in router.message.handlers for f in h.filters or []
                if isinstance(f.callback, Command) for c in f.callback.commands if isinstance(c, str)}
-    assert {c.command for c in BOT_COMMANDS} <= handled  # меню не обіцяє команд, яких бот не знає
+    assert {c.command for c in BOT_COMMANDS} <= handled  # the menu doesn't promise commands the bot doesn't know
 
 
 def test_login_prompt_skips_a_non_https_link_but_keeps_copy():
@@ -129,7 +129,7 @@ def test_login_without_access_leaves_a_trace_but_no_email(caplog):
 
 
 def run_login(answer):
-    """/login з фейками: Google видає код, а вхід ніколи не завершується."""
+    """/login with fakes: Google hands out a code, and the login never completes."""
     import asyncio
     from types import SimpleNamespace
 
@@ -149,7 +149,7 @@ def run_login(answer):
                        SimpleNamespace(start=start, wait_for_email=never_finishes),
                        RateLimiter(3), RateLimiter(20), logins)
         task = logins.pop(7, None)
-        await asyncio.sleep(0)  # дати скасуванню відпрацювати
+        await asyncio.sleep(0)  # let the cancellation run
         alive = task is not None and not task.done()
         if task:
             task.cancel()
@@ -173,16 +173,16 @@ def test_login_code_still_arrives_as_plain_text_if_rejected():
             raise bad_request(text)
         sent.append((text, kwargs))
 
-    assert run_login(answer)  # код дійшов — вхід чекає далі
+    assert run_login(answer)  # the code arrived: the login keeps waiting
     assert len(sent) == 1 and "YNV-JZP-PXGB" in sent[0][0]
-    assert sent[0][1] == {"parse_mode": None}  # голий текст, як до кнопок
+    assert sent[0][1] == {"parse_mode": None}  # plain text, as before the buttons
 
 
 def test_undelivered_login_code_stops_the_login():
     from aiogram.exceptions import TelegramForbiddenError
     from aiogram.methods import SendMessage
 
-    async def answer(text, **kwargs):  # людина заблокувала бота
+    async def answer(text, **kwargs):  # the person blocked the bot
         raise TelegramForbiddenError(SendMessage(chat_id=1, text=text), "Forbidden: bot was blocked by the user")
 
     assert not run_login(answer)

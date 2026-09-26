@@ -28,7 +28,7 @@ def no_sleep(monkeypatch):
 
 def store(files, handler) -> GoogleStore:
     client, owner = files
-    s = GoogleStore.__new__(GoogleStore)  # без справжнього ключа service account
+    s = GoogleStore.__new__(GoogleStore)  # without a real service account key
     s._client_id, s._client_secret, s._owner_refresh = "cid", "cs", "rt"
     s._owner_token, s._owner_expires = "", 0.0
     s._sheet_id, s._folder_id = "SHEET", "FOLDER"
@@ -110,7 +110,7 @@ PERMS = {"permissions": [
 
 @pytest.mark.parametrize("email, ok", [
     ("owner@gmail.com", True), ("by@trustee.io", True), ("reader@gmail.com", False),
-    ("anyone@team.ua", False),  # доступ на домен не рахуємо: особистий акаунт може мати корпоративну адресу
+    ("anyone@team.ua", False),  # domain-wide access doesn't count: a personal account can use a company address
     ("stranger@gmail.com", False),
 ])
 def test_access_needs_edit_rights(files, email, ok):
@@ -138,7 +138,7 @@ def test_permissions_are_cached_for_an_album(files):
 
 
 def test_anyone_with_link_does_not_count(files):
-    # бот публічний: "будь-хто з посиланням" пустило б будь-який Google-акаунт
+    # the bot is public: "anyone with the link" would let in any Google account
     async def scenario():
         s = store(files, lambda r: httpx.Response(200, json={"permissions": [{"role": "writer", "type": "anyone"}]}))
         assert not await s.has_access("whoever@gmail.com")
@@ -172,7 +172,7 @@ def google_ok(log, sheet_fails=False, header=None):
             assert cells[6] == "https://drive/F1" and cells[8] == "rid1"
             return httpx.Response(200, json={})
         if path.endswith("/values/I:I"):
-            return httpx.Response(200, json={"values": [["ID"]]})  # 503 на append -> шукаємо рядок, його нема
+            return httpx.Response(200, json={"values": [["ID"]]})  # 503 on append -> look for the row, it isn't there
         if request.method == "DELETE" and path == "/drive/v3/files/F1":
             return httpx.Response(204)
         raise AssertionError((request.method, path))
@@ -189,7 +189,7 @@ def test_receipt_goes_to_drive_then_sheets(files):
     asyncio.run(scenario())
     order = [p for _, p in log]
     assert order.index("/upload/drive/v3/files") < order.index("/v4/spreadsheets/SHEET/values/A1:append")
-    assert ("PUT", "/v4/spreadsheets/SHEET/values/A1:I1") in log  # порожня таблиця -> заголовок
+    assert ("PUT", "/v4/spreadsheets/SHEET/values/A1:I1") in log  # empty sheet -> header
 
 
 def test_header_is_not_rewritten(files):
@@ -211,7 +211,7 @@ def test_sheet_failure_removes_the_photo(files):
             await s.save_receipt(b"JPEGDATA", "image/jpeg", "r.jpg", ROW)
 
     asyncio.run(scenario())
-    assert ("DELETE", "/drive/v3/files/F1") in log  # жодного фото без рядка
+    assert ("DELETE", "/drive/v3/files/F1") in log  # no photo without a row
 
 
 def test_drive_failure_writes_nothing(files):
@@ -233,7 +233,7 @@ def test_drive_failure_writes_nothing(files):
 
 def test_formula_like_name_stays_text():
     row = ReceiptRow("id", "t", "", '=IMPORTXML("http://evil")', "e@x", 1.0, "UAH", True)
-    assert row.cells("link")[2] == '=IMPORTXML("http://evil")'  # а RAW у запиті не дає Sheets її виконати
+    assert row.cells("link")[2] == '=IMPORTXML("http://evil")'  # and RAW in the request keeps Sheets from running it
 
 
 # --- storage ---
@@ -249,7 +249,7 @@ def test_users_link_relink_unlink(tmp_path):
     users.close()
 
 
-# --- знахідки ревю f93b051 ---
+# --- review findings f93b051 ---
 
 def unsure_append(log, row_there=None, lookup_fails=False):
     def handler(request):
@@ -262,7 +262,7 @@ def unsure_append(log, row_there=None, lookup_fails=False):
         if path.endswith("/values/A1:I1"):
             return httpx.Response(200, json={"values": [["Додано"]]})
         if path.endswith("/values/A1:append"):
-            raise httpx.ReadTimeout("slow")  # Google міг записати, але відповідь не дійшла
+            raise httpx.ReadTimeout("slow")  # Google may have saved it, but the reply got lost
         if path.endswith("/values/I:I"):
             if lookup_fails:
                 return httpx.Response(503, json={"error": {"status": "UNAVAILABLE"}})
@@ -281,7 +281,7 @@ def test_timeout_but_row_saved_is_success(files):
             b"JPEGDATA", "image/jpeg", "r.jpg", ROW) == "https://drive/F1"
 
     asyncio.run(scenario())
-    assert not any(m == "DELETE" for m, _ in log)  # фото лишилось: рядок на нього посилається
+    assert not any(m == "DELETE" for m, _ in log)  # the photo stays: the row points to it
 
 
 def test_timeout_and_no_row_removes_photo(files):
@@ -303,7 +303,7 @@ def test_timeout_and_unknown_keeps_photo(files):
             await store(files, unsure_append(log, lookup_fails=True)).save_receipt(b"JPEGDATA", "image/jpeg", "r.jpg", ROW)
 
     asyncio.run(scenario())
-    assert not any(m == "DELETE" for m, _ in log)  # не знаємо, чи є рядок, — фото не видаляємо
+    assert not any(m == "DELETE" for m, _ in log)  # we don't know whether the row exists, so the photo stays
 
 
 def test_non_json_reply_still_cleans_up(files):
@@ -328,7 +328,7 @@ def test_non_json_reply_still_cleans_up(files):
 
 
 def test_first_check_right_after_boot_asks_google(files, monkeypatch):
-    monkeypatch.setattr(g.time, "monotonic", lambda: 5.0)  # VM щойно завантажилась
+    monkeypatch.setattr(g.time, "monotonic", lambda: 5.0)  # the VM has just booted
 
     async def scenario():
         s = store(files, lambda r: httpx.Response(200, json=PERMS))
@@ -363,14 +363,14 @@ def test_device_polling_survives_a_5xx(files):
     asyncio.run(scenario())
 
 
-# --- ревю всього репо 91fe2ea ---
+# --- whole-repo review 91fe2ea ---
 
 def test_one_email_one_telegram(tmp_path):
     users = Users(str(tmp_path / "bot.db"))
     assert users.link(1, "a@gmail.com") == []
-    assert users.link(2, "a@gmail.com") == [1]  # перший акаунт відключено — і йому про це скажуть
+    assert users.link(2, "a@gmail.com") == [1]  # the first account is unlinked, and it will be told
     assert users.email(1) is None and users.email(2) == "a@gmail.com"
-    assert users.link(2, "a@gmail.com") == []  # повторний вхід тим самим акаунтом нікого не зачіпає
+    assert users.link(2, "a@gmail.com") == []  # signing in again with the same account affects nobody
     users.close()
 
 
@@ -378,7 +378,7 @@ def test_save_limit_per_user():
     from receipt_bot.handlers import SaveLimit
     limit = SaveLimit(2)
     assert limit.take(1) and limit.take(1) and not limit.take(1)
-    assert limit.take(2)  # в іншої людини свій ліміт
+    assert limit.take(2)  # another person has their own limit
 
 
 def test_sender_has_numeric_id():
@@ -455,16 +455,16 @@ FOLDER = {"name": "Чеки (бот)", "mimeType": "application/vnd.google-apps.
 def test_owner_login_checks_an_existing_folder(files, tmp_path):
     _, target, shown = run_owner(files, tmp_path, owner_handler(folder=FOLDER), folder_id="FOLDER")
     assert "Чеки (бот)" in shown and "NEWFOLDER" not in shown
-    assert shown.index("owner@gmail.com") < shown.index("Чеки (бот)")  # хто увійшов — видно до перевірки папки
+    assert shown.index("owner@gmail.com") < shown.index("Чеки (бот)")  # who signed in is shown before the folder check
     assert json.loads(open(target, encoding="utf-8").read())["refresh_token"] == "rt-secret"
 
 
 @pytest.mark.parametrize("handler_kwargs, folder_id", [
-    ({"scope": "openid email"}, ""),  # галочку Drive зняли на екрані згоди
+    ({"scope": "openid email"}, ""),  # the Drive checkbox was unticked on the consent screen
     ({"verified": False}, ""),
-    ({}, "FOLDER"),  # увійшли не тим акаунтом: папку не видно
+    ({}, "FOLDER"),  # wrong account: the folder isn't visible
     ({"folder": {**FOLDER, "trashed": True}}, "FOLDER"),
-    ({"folder": {**FOLDER, "ownedByMe": False}}, "FOLDER"),  # папку бачить команда, але власник не він
+    ({"folder": {**FOLDER, "ownedByMe": False}}, "FOLDER"),  # the team sees it, but this account isn't the owner
     ({"folder": "down"}, "FOLDER"),
 ])
 def test_owner_login_keeps_the_old_token_on_failure(files, tmp_path, handler_kwargs, folder_id):
