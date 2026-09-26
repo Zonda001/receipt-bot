@@ -392,3 +392,90 @@ def test_non_image_is_never_uploaded():
     from receipt_bot.recognition import NotAnImage, validate_image
     with pytest.raises(NotAnImage):
         asyncio.run(validate_image(b"\x00" * 1000))
+
+
+# --- owner login (python -m receipt_bot.owner_login) ---
+
+DRIVE_SCOPE = "openid https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.email"
+
+
+def owner_handler(scope: str = DRIVE_SCOPE, verified: bool = True, folder=None):
+    def handler(request):
+        path = request.url.path
+        if path == "/device/code":
+            assert "drive.file" in request.content.decode()
+            return httpx.Response(200, json={"device_code": "dc", "user_code": "OWN-ER", "expires_in": 1800,
+                                             "verification_url": "https://www.google.com/device", "interval": 5})
+        if path == "/token":
+            return httpx.Response(200, json={"access_token": "at", "refresh_token": "rt-secret", "scope": scope})
+        if path == "/v1/userinfo":
+            return httpx.Response(200, json={"email": "Owner@Gmail.com", "email_verified": verified})
+        assert request.headers["Authorization"] == "Bearer at"
+        if path == "/drive/v3/files" and request.method == "POST":
+            assert json.loads(request.content)["mimeType"] == "application/vnd.google-apps.folder"
+            return httpx.Response(200, json={"id": "NEWFOLDER"})
+        if path == "/drive/v3/files/FOLDER" and request.method == "GET":
+            if folder == "down":
+                return httpx.Response(503, json={"error": {"status": "UNAVAILABLE"}})
+            return (httpx.Response(200, json=folder) if folder
+                    else httpx.Response(404, json={"error": {"status": "NOT_FOUND"}}))
+        raise AssertionError(request.url)
+    return handler
+
+
+def run_owner(files, tmp_path, handler, token_file=None, folder_id=""):
+    from receipt_bot.owner_login import run
+
+    shown = []
+    target = str(token_file or tmp_path / "owner-token.json")
+
+    async def scenario():
+        http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        return await run(files[0], target, http, shown.append, folder_id=folder_id)
+
+    return asyncio.run(scenario()), target, "\n".join(shown)
+
+
+def test_owner_login_creates_the_folder_and_saves_the_token_quietly(files, tmp_path):
+    import os
+    import sys
+
+    email, target, shown = run_owner(files, tmp_path, owner_handler())
+    assert email == "owner@gmail.com"
+    assert json.loads(open(target, encoding="utf-8").read()) == {"refresh_token": "rt-secret", "scope": DRIVE_SCOPE}
+    assert "OWN-ER" in shown and "DRIVE_FOLDER_ID=NEWFOLDER" in shown and "rt-secret" not in shown
+    if sys.platform != "win32":
+        assert oct(os.stat(target).st_mode & 0o777) == "0o600"
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".owner-token-")] == []
+
+
+FOLDER = {"name": "Чеки (бот)", "mimeType": "application/vnd.google-apps.folder", "trashed": False, "ownedByMe": True}
+
+
+def test_owner_login_checks_an_existing_folder(files, tmp_path):
+    _, target, shown = run_owner(files, tmp_path, owner_handler(folder=FOLDER), folder_id="FOLDER")
+    assert "Чеки (бот)" in shown and "NEWFOLDER" not in shown
+    assert shown.index("owner@gmail.com") < shown.index("Чеки (бот)")  # хто увійшов — видно до перевірки папки
+    assert json.loads(open(target, encoding="utf-8").read())["refresh_token"] == "rt-secret"
+
+
+@pytest.mark.parametrize("handler_kwargs, folder_id", [
+    ({"scope": "openid email"}, ""),  # галочку Drive зняли на екрані згоди
+    ({"verified": False}, ""),
+    ({}, "FOLDER"),  # увійшли не тим акаунтом: папку не видно
+    ({"folder": {**FOLDER, "trashed": True}}, "FOLDER"),
+    ({"folder": {**FOLDER, "ownedByMe": False}}, "FOLDER"),  # папку бачить команда, але власник не він
+    ({"folder": "down"}, "FOLDER"),
+])
+def test_owner_login_keeps_the_old_token_on_failure(files, tmp_path, handler_kwargs, folder_id):
+    old = tmp_path / "owner-token.json"
+    old.write_text('{"refresh_token": "old"}', encoding="utf-8")
+    with pytest.raises(GoogleError):
+        run_owner(files, tmp_path, owner_handler(**handler_kwargs), token_file=old, folder_id=folder_id)
+    assert json.loads(old.read_text(encoding="utf-8")) == {"refresh_token": "old"}
+
+
+def test_owner_login_does_not_blame_the_folder_for_a_google_outage(files, tmp_path):
+    with pytest.raises(g.GoogleUnsure) as e:
+        run_owner(files, tmp_path, owner_handler(folder="down"), folder_id="FOLDER")
+    assert "clear DRIVE_FOLDER_ID" not in str(e.value)

@@ -107,14 +107,17 @@ class GoogleLogin:
         self._client_id, self._client_secret = _client(client_file)
         self._http = http
 
-    async def start(self) -> DeviceCode:
+    async def start(self, scope: str = "openid email") -> DeviceCode:
         r = await _call(self._http, "device code", "POST", DEVICE_URL,
-                        data={"client_id": self._client_id, "scope": "openid email"})
+                        data={"client_id": self._client_id, "scope": scope})
         d = _json(r, "device code")
         return DeviceCode(d["device_code"], d["user_code"], d.get("verification_url") or d["verification_uri"],
                           int(d.get("expires_in", 1800)), int(d.get("interval", 5)))
 
     async def wait_for_email(self, code: DeviceCode) -> str:
+        return await self.email((await self.wait_for_tokens(code))["access_token"])
+
+    async def wait_for_tokens(self, code: DeviceCode) -> dict:
         deadline = time.monotonic() + code.expires_in
         interval = code.interval
         while time.monotonic() < deadline:
@@ -128,7 +131,10 @@ class GoogleLogin:
             if r.status_code >= 500:
                 continue
             if r.status_code == 200:
-                return await self._email(_json(r, "device token")["access_token"])
+                tokens = _json(r, "device token")
+                if not isinstance(tokens, dict) or "access_token" not in tokens:
+                    raise GoogleError("device token: no access_token")
+                return tokens
             try:
                 error = r.json().get("error")
             except (ValueError, AttributeError):
@@ -145,7 +151,7 @@ class GoogleLogin:
             raise GoogleError(f"device token: HTTP {r.status_code} {error}")
         raise LoginExpired()
 
-    async def _email(self, access_token: str) -> str:
+    async def email(self, access_token: str) -> str:
         r = await _call(self._http, "userinfo", "GET", USERINFO_URL,
                         headers={"Authorization": f"Bearer {access_token}"})
         info = _json(r, "userinfo")
