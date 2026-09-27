@@ -217,11 +217,10 @@ fallback (~80 a day). Only a person catches a wrong digit, so the bot never save
 - **26.09, an account without access:** the bot named the account and refused, the email wasn't stored. A photo after
   that got "Sign in first", with no recognition and no record.
 - **26.09:** the command menu and the login buttons ("Copy code", "Open Google") in the Telegram client.
-- **27.09, a run of real receipts:** 16 receipts as one album and a few more separately. Every row in the sheet has
-  its own photo in Drive with the same ID, no stray photos (checked with the service account). "Amount + fee" was
-  picked on 8 payment receipts. A manual amount after an invalid "abc" was saved and marked as manual. Cancel writes
-  nothing. After the tests, repeats of the same receipt and all bank payment receipts were removed from the sheet
-  and Drive: those carry personal data (names, tax IDs, IBANs, addresses). What's left are shop receipts.
+- **27.09, a run of real receipts:** an album of receipts and a few more separately. Every row in the sheet has its
+  own photo in Drive with the same ID, no stray photos (checked with the service account). "Amount + fee" was picked
+  on bank payment receipts. A manual amount after an invalid "abc" was saved and marked as manual. Cancel writes
+  nothing.
 - **27.09, not a receipt:** on a photo of earphones the model said "a receipt without an amount", and the bot replied
   "Couldn't find the amount on the receipt". After the fix (the second look), 7 non-receipt photos in a row got
   "Doesn't look like a receipt". On two of them the main request said "receipt" again.
