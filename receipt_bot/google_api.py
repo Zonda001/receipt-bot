@@ -267,8 +267,12 @@ class GoogleStore:
         except GoogleUnreachable:
             raise  # nothing was uploaded
         except GoogleUnsure:
-            log.error("upload outcome unknown, check Drive for %r", file_name)
-            raise
+            # Live 28.09: Drive made the file in 2 s, the answer never came. Take that file instead of a second one.
+            found = await self._find_upload(file_name)
+            if found is None:
+                log.error("upload outcome unknown, check Drive for %r", file_name)
+                raise
+            file_id, link = found
         try:
             await self._append(row.cells(link))
         except GoogleUnreachable:
@@ -294,6 +298,20 @@ class GoogleStore:
                         headers=await self._owner_headers())
         except GoogleError as e:
             log.error("orphan photo left in Drive: %s (%s)", file_id, e)
+
+    async def _find_upload(self, file_name: str) -> tuple[str, str] | None:
+        """The photo by its exact name (it carries the receipt ID) in our folder, or None if it isn't there."""
+        name = file_name.replace("\\", "\\\\").replace("'", "\\'")
+        try:
+            r = await _call(self._http, "drive lookup", "GET", f"{DRIVE_URL}/files", headers=await self._owner_headers(),
+                            params={"q": f"name = '{name}' and '{self._folder_id}' in parents and trashed = false",
+                                    "fields": "files(id,webViewLink)", "pageSize": 2})
+            files = _json(r, "drive lookup").get("files", [])
+        except GoogleError:
+            return None
+        if len(files) != 1:
+            return None
+        return files[0]["id"], files[0].get("webViewLink") or f"https://drive.google.com/file/d/{files[0]['id']}/view"
 
     async def _row_written(self, receipt_id: str) -> bool:
         r = await _call(self._http, "sheet lookup", "GET", f"{SHEETS_URL}/{self._sheet_id}/values/{ID_COLUMN}",

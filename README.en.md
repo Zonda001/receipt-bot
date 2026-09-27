@@ -85,7 +85,9 @@ flowchart LR
 - **No row without a photo.** The photo is uploaded first, then the row is written. If Google clearly refused (4xx)
   or the row request never even reached Google (no connection), the photo is deleted. If Google answered 5xx or
   didn't answer in time, the bot looks the row up by the receipt ID, and if it isn't there, keeps the photo: the row
-  may still land later, and a spare photo beats a row with a dead link.
+  may still land later, and a spare photo beats a row with a dead link. The same goes for the photo: if the answer to
+  the upload never comes, the bot looks for the file in the folder by its name (it carries the receipt ID) and, if
+  it's there, takes that file instead of uploading a second copy.
 - **SQLite holds only the Telegram ↔ email link.** Receipts awaiting confirmation live in memory, so after a restart
   old buttons answer "receipt expired". Cost: an unconfirmed receipt then has to be sent again. In return, the
   database has no half-written states to untangle.
@@ -179,14 +181,14 @@ is unlinked and gets a warning.
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                                          # 223 tests, no network: Google and the providers are fakes
+pytest                                          # 227 tests, no network: Google and the providers are fakes
 ```
 
 | File | What it checks |
 |---|---|
 | `tests/test_recognition.py` | Validation of the model's answer: amounts, currency, date. VAT, change and cash are never the total, a cap on the number of buttons. The photo is checked before sending: formats, "bombs" with a giant resolution or thousands of scans, truncated JPEGs |
 | `tests/test_providers.py` | Primary and fallback provider: daily limit, provider pause after a failure, `retry-after`, the queue. Bank fee (the "with fee" button, no double counting). Polish and English labels. The second look at photos without amounts: the verdict, seven kinds of failure without blocking the provider, skipping instead of waiting, the main request stays unchanged. A provider's error text can't fake a journal line |
-| `tests/test_google.py` | Device flow (waiting, denial, expired code, unverified email). Edit rights: "anyone with the link" doesn't count. Photo, then row, and compensation: Drive down, Sheets refusing (4xx, the photo is deleted), 5xx or a timeout (the photo stays). No connection: no photo is left behind. The Drive and sheet check before saving names what's down. Parallel access checks make one request. One email, one Telegram. Save and byte limits per Google account. Names like `=IMPORTXML(...)` stay text, and an RLO in a name can't hide the ID. `owner_login` |
+| `tests/test_google.py` | Device flow (waiting, denial, expired code, unverified email). Edit rights: "anyone with the link" doesn't count. Photo, then row, and compensation: Drive down, Sheets refusing (4xx, the photo is deleted), 5xx or a timeout (the photo stays). No connection: no photo is left behind. The answer to an upload got lost: the photo is taken by name, no second copy. The Drive and sheet check before saving names what's down. Parallel access checks make one request. One email, one Telegram. Save and byte limits per Google account. Names like `=IMPORTXML(...)` stay text, and an RLO in a name can't hide the ID. `owner_login` |
 | `tests/test_concurrency.py` | Races: two quick "type manually" taps on different receipts. Daily quota accounting when the provider answers 429 |
 | `tests/test_handlers_and_config.py` | The command menu matches the real handlers. Login buttons. The login code gets through even without buttons, and if it doesn't get through at all, the login is cancelled. Config errors don't print values. "Not a receipt" leaves only manual entry and cancel. A daily recognition share per person. If Google is down, a save stops before the photo is uploaded; "not sure" doesn't say "not saved" |
 | `tests/test_logging.py` | Tokens are stripped from the log, tracebacks included |
@@ -226,6 +228,10 @@ fallback (~80 a day). Only a person catches a wrong digit, so the bot never save
 - **28.09, the sheet unreachable** (`sheets.googleapis.com` blocked on the VM): no row was added. But the photo stayed
   in Drive, and the message contradicted itself ("not sure it was saved" and right after it "not saved"). Now the bot
   checks Drive and the sheet before saving and tells "no connection" apart from "didn't answer in time".
+- **28.09, the retest:** with the same block the bot said "Can't connect to Google Sheets" and uploaded nothing. After
+  unblocking, the second tap hit a real timeout: Drive made the file in 2 s, but the answer didn't come within 30 s,
+  so the third tap uploaded a second copy of the photo (still one row). Now after such a timeout the bot looks the file
+  up by name and takes it. The spare copies from the tests were removed: every row has exactly one photo.
 
 ### Error scenarios
 
@@ -243,6 +249,7 @@ fallback (~80 a day). Only a person catches a wrong digit, so the bot never save
 | Connection lost in the middle of a save | "Can't connect to Google" | the photo is deleted | `test_unreachable_sheets_removes_the_photo`, `test_unreachable_drive_uploads_nothing` |
 | Drive ok, Sheets refused (4xx) | the same | the photo is deleted | `test_sheet_failure_removes_the_photo` |
 | Sheets 5xx or Google didn't answer in time | either "Saved" or "not sure it was saved, check the sheet" | the row is looked up by ID; if it isn't there, the photo stays | `test_sheet_5xx_keeps_the_photo`, `test_timeout_*` |
+| The photo uploaded, the answer got lost | "Saved" | the photo is found by name, no second copy | live 28.09 (before the fix: a second copy), `test_upload_timeout_*` |
 | Manual amount not a number or ≤ 0 | "Enter a number" | nothing | live 27.09, `test_parse_amount_rejects` |
 | "Confirm" tapped twice | "Already processing…" | one row | only in code: the status changes before the first `await`, no automated test |
 | An old button (after a restart) | "Receipt expired" | nothing | live 27.09 (bot restart), no automated test |

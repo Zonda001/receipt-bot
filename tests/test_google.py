@@ -394,6 +394,65 @@ def test_unreachable_drive_uploads_nothing(files):
     assert not any("append" in p or m == "DELETE" for m, p in log)
 
 
+def upload_times_out(log, found):
+    """The upload's answer never comes; the lookup by name finds `found`."""
+    def handler(request):
+        path = request.url.path
+        log.append((request.method, path, request.url.params.get("q", "")))
+        if path == "/token":
+            return httpx.Response(200, json={"access_token": "owner", "expires_in": 3600})
+        if path == "/upload/drive/v3/files":
+            raise httpx.ReadTimeout("Drive made the file, the answer got lost")
+        if path == "/drive/v3/files" and request.method == "GET":
+            return httpx.Response(200, json={"files": found})
+        if path.endswith("/values/A1:I1"):
+            return httpx.Response(200, json={"values": [["Додано"]]})
+        if path.endswith("/values/A1:append"):
+            assert json.loads(request.read())["values"][0][6] == "https://drive/F9"
+            return httpx.Response(200, json={})
+        raise AssertionError((request.method, path))
+    return handler
+
+
+def test_upload_timeout_takes_the_file_drive_made(files):
+    # live 28.09: the answer to the upload was lost, the retry uploaded a second copy
+    log = []
+    name = "2026-09-28 00-12 165.00 UAH b738e812ff1c6098.jpg"
+
+    async def scenario():
+        s = store(files, upload_times_out(log, [{"id": "F9", "webViewLink": "https://drive/F9"}]))
+        return await s.save_receipt(b"JPEGDATA", "image/jpeg", name, ROW)
+
+    assert asyncio.run(scenario()) == "https://drive/F9"
+    assert sum(p == "/upload/drive/v3/files" for _, p, _ in log) == 1  # one upload, no second copy
+    lookup = next(q for _, p, q in log if p == "/drive/v3/files")
+    assert f"name = '{name}'" in lookup and "'FOLDER' in parents" in lookup and "trashed = false" in lookup
+    assert any(p.endswith("/values/A1:append") for _, p, _ in log)
+
+
+@pytest.mark.parametrize("found", [[], [{"id": "A"}, {"id": "B"}]], ids=["not-there", "ambiguous"])
+def test_upload_timeout_without_one_clear_file_stays_unsure(files, found):
+    log = []
+
+    async def scenario():
+        with pytest.raises(g.GoogleUnsure):
+            await store(files, upload_times_out(log, found)).save_receipt(b"JPEGDATA", "image/jpeg", "r.jpg", ROW)
+
+    asyncio.run(scenario())
+    assert not any(p.endswith(":append") for _, p, _ in log)  # no row for a photo we can't point to
+
+
+def test_upload_lookup_escapes_the_name(files):
+    log = []
+
+    async def scenario():
+        with pytest.raises(g.GoogleUnsure):
+            await store(files, upload_times_out(log, [])).save_receipt(b"JPEGDATA", "image/jpeg", "it's.jpg", ROW)
+
+    asyncio.run(scenario())
+    assert "name = 'it\\'s.jpg'" in next(q for _, p, q in log if p == "/drive/v3/files")
+
+
 def ping_handler(log, drive=None, sheets=None):
     """drive / sheets: an exception to raise or a status to answer with (None: all good)."""
     def handler(request):
