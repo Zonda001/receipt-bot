@@ -34,5 +34,6 @@ class Settings(BaseSettings):
 
     # Daily safety cap for the whole team. Free-tier ceilings: Cloudflare ~1100 receipts, Groq ~80.
     daily_recognitions: int = 300
+    daily_recognitions_per_person: int = 100  # per Google account, so one person can't use up the team's cap
 
     db_path: str = "data/bot.db"  # which Telegram user signed in with which Google account

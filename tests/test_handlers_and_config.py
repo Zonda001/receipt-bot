@@ -6,16 +6,23 @@ from receipt_bot.handlers import DailyQuota
 
 
 def test_daily_quota_give_back():
-    q = DailyQuota(2)
-    assert q.take() and q.take() and not q.take()
-    q.give_back()
-    assert q.take() and not q.take()
+    q = DailyQuota(2, 5)
+    assert q.take("a@x") and q.take("a@x") and not q.take("a@x")
+    q.give_back("a@x")
+    assert q.take("a@x") and not q.take("a@x")
 
 
 def test_quota_give_back_never_below_zero():
-    q = DailyQuota(1)
-    q.give_back()
-    assert q.take() and not q.take()
+    q = DailyQuota(1, 5)
+    q.give_back("a@x")
+    assert q.take("a@x") and not q.take("a@x")
+
+
+def test_one_person_cannot_use_up_the_team_quota():
+    q = DailyQuota(3, 2)
+    assert q.take("a@x") and q.take("a@x") and not q.take("a@x")  # a's share is spent, the team still has one
+    q.give_back("c@x")  # nothing to give back for someone who took nothing
+    assert q.take("b@x") and not q.take("b@x")  # now the team's cap is spent too
 
 
 def test_settings_errors_do_not_print_values(tmp_path, monkeypatch):

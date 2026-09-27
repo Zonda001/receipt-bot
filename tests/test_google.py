@@ -34,6 +34,7 @@ def store(files, handler) -> GoogleStore:
     s._sheet_id, s._folder_id = "SHEET", "FOLDER"
     s._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     s._permissions, s._permissions_at, s._header_ok = [], float("-inf"), False
+    s._permissions_lock = asyncio.Lock()
 
     async def sa_headers():
         return {"Authorization": "Bearer sa"}
@@ -102,14 +103,14 @@ def test_unverified_email_is_rejected(files):
 
 PERMS = {"permissions": [
     {"role": "owner", "type": "user", "emailAddress": "owner@gmail.com"},
-    {"role": "writer", "type": "user", "emailAddress": "By@Trustee.io"},
+    {"role": "writer", "type": "user", "emailAddress": "Reviewer@Example.com"},
     {"role": "reader", "type": "user", "emailAddress": "reader@gmail.com"},
     {"role": "writer", "type": "domain", "domain": "team.ua"},
 ]}
 
 
 @pytest.mark.parametrize("email, ok", [
-    ("owner@gmail.com", True), ("by@trustee.io", True), ("reader@gmail.com", False),
+    ("owner@gmail.com", True), ("reviewer@example.com", True), ("reader@gmail.com", False),
     ("anyone@team.ua", False),  # domain-wide access doesn't count: a personal account can use a company address
     ("stranger@gmail.com", False),
 ])
@@ -131,8 +132,28 @@ def test_permissions_are_cached_for_an_album(files):
     async def scenario():
         s = store(files, handler)
         for _ in range(10):
-            await s.has_access("by@trustee.io")
+            await s.has_access("reviewer@example.com")
         assert len(calls) == 1
+
+    asyncio.run(scenario())
+
+
+def test_parallel_checks_share_one_refresh(files):
+    # an album arrives at once: ten checks on a stale cache used to fire ten permissions requests
+    calls = []
+
+    async def handler(request):
+        calls.append(request)
+        loop = asyncio.get_running_loop()
+        answered = loop.create_future()
+        loop.call_soon(answered.set_result, None)
+        await answered  # a real pause, so the other checks run meanwhile
+        return httpx.Response(200, json=PERMS)
+
+    async def scenario():
+        s = store(files, handler)
+        results = await asyncio.gather(*(s.has_access("reviewer@example.com") for _ in range(10)))
+        assert all(results) and len(calls) == 1
 
     asyncio.run(scenario())
 
@@ -148,7 +169,8 @@ def test_anyone_with_link_does_not_count(files):
 
 # --- saving ---
 
-def google_ok(log, sheet_fails=False, header=None):
+def google_ok(log, sheet_fails=0, header=None):
+    """sheet_fails: the HTTP status the append gets (0: it works)."""
     def handler(request):
         log.append((request.method, request.url.path))
         path = request.url.path
@@ -167,12 +189,12 @@ def google_ok(log, sheet_fails=False, header=None):
             assert request.headers["Authorization"] == "Bearer sa"
             assert request.url.params["valueInputOption"] == "RAW"
             if sheet_fails:
-                return httpx.Response(503, json={"error": {"status": "UNAVAILABLE"}})
+                return httpx.Response(sheet_fails, json={"error": {"status": "FAILED"}})
             cells = json.loads(request.read())["values"][0]
             assert cells[6] == "https://drive/F1" and cells[8] == "rid1"
             return httpx.Response(200, json={})
         if path.endswith("/values/I:I"):
-            return httpx.Response(200, json={"values": [["ID"]]})  # 503 on append -> look for the row, it isn't there
+            return httpx.Response(200, json={"values": [["ID"]]})  # 5xx on append -> look for the row, it isn't there
         if request.method == "DELETE" and path == "/drive/v3/files/F1":
             return httpx.Response(204)
         raise AssertionError((request.method, path))
@@ -202,16 +224,31 @@ def test_header_is_not_rewritten(files):
     assert ("PUT", "/v4/spreadsheets/SHEET/values/A1:I1") not in log
 
 
-def test_sheet_failure_removes_the_photo(files):
+@pytest.mark.parametrize("status", [400, 403, 404])
+def test_sheet_failure_removes_the_photo(files, status):
     log = []
 
     async def scenario():
-        s = store(files, google_ok(log, sheet_fails=True))
+        s = store(files, google_ok(log, sheet_fails=status))
         with pytest.raises(GoogleError):
             await s.save_receipt(b"JPEGDATA", "image/jpeg", "r.jpg", ROW)
 
     asyncio.run(scenario())
-    assert ("DELETE", "/drive/v3/files/F1") in log  # no photo without a row
+    assert ("DELETE", "/drive/v3/files/F1") in log  # Google clearly refused: no row, so no photo either
+
+
+@pytest.mark.parametrize("status", [500, 503, 504])
+def test_sheet_5xx_keeps_the_photo(files, status):
+    # a 5xx doesn't prove the row isn't coming (504: the backend may still be writing it)
+    log = []
+
+    async def scenario():
+        s = store(files, google_ok(log, sheet_fails=status))
+        with pytest.raises(g.GoogleUnsure):
+            await s.save_receipt(b"JPEGDATA", "image/jpeg", "r.jpg", ROW)
+
+    asyncio.run(scenario())
+    assert not any(m == "DELETE" for m, _ in log)
 
 
 def test_drive_failure_writes_nothing(files):
@@ -284,15 +321,16 @@ def test_timeout_but_row_saved_is_success(files):
     assert not any(m == "DELETE" for m, _ in log)  # the photo stays: the row points to it
 
 
-def test_timeout_and_no_row_removes_photo(files):
+def test_timeout_and_no_row_yet_keeps_photo(files):
     log = []
 
     async def scenario():
-        with pytest.raises(GoogleError):
+        with pytest.raises(g.GoogleUnsure):
             await store(files, unsure_append(log, row_there=False)).save_receipt(b"JPEGDATA", "image/jpeg", "r.jpg", ROW)
 
     asyncio.run(scenario())
-    assert ("DELETE", "/drive/v3/files/F1") in log
+    # the row may still land after the lookup: a spare photo beats a row with a dead link
+    assert not any(m == "DELETE" for m, _ in log)
 
 
 def test_timeout_and_unknown_keeps_photo(files):
@@ -332,7 +370,7 @@ def test_first_check_right_after_boot_asks_google(files, monkeypatch):
 
     async def scenario():
         s = store(files, lambda r: httpx.Response(200, json=PERMS))
-        assert await s.has_access("by@trustee.io")
+        assert await s.has_access("reviewer@example.com")
 
     asyncio.run(scenario())
 
@@ -376,9 +414,17 @@ def test_one_email_one_telegram(tmp_path):
 
 def test_save_limit_per_user():
     from receipt_bot.handlers import SaveLimit
-    limit = SaveLimit(2)
-    assert limit.take(1) and limit.take(1) and not limit.take(1)
-    assert limit.take(2)  # another person has their own limit
+    limit = SaveLimit(2, 10_000)
+    assert limit.take("a@x", 10) and limit.take("a@x", 10) and not limit.take("a@x", 10)
+    assert limit.take("b@x", 10)  # another Google account has its own limit; another Telegram doesn't
+
+
+def test_save_limit_counts_bytes():
+    from receipt_bot.handlers import SaveLimit
+    limit = SaveLimit(100, 250)
+    assert limit.take("a@x", 100) and limit.take("a@x", 100)
+    assert not limit.take("a@x", 100)  # 300 bytes would be over the day's 250
+    assert limit.take("a@x", 50)  # exactly up to the budget still fits
 
 
 def test_sender_has_numeric_id():
@@ -386,6 +432,14 @@ def test_sender_has_numeric_id():
     from receipt_bot.handlers import display_name
     assert display_name(SimpleNamespace(id=42, first_name="Admin", last_name=None, username=None)) == "Admin (id 42)"
     assert "id 42" in display_name(SimpleNamespace(id=42, first_name="A", last_name="B", username="ab"))
+
+
+def test_sender_name_cannot_scramble_the_id():
+    from types import SimpleNamespace
+    from receipt_bot.handlers import display_name
+    # RLO would show "id 7" backwards in the sheet; BEL and other control characters are just noise
+    assert display_name(SimpleNamespace(id=7, first_name="Ev‮il", last_name="\x07", username=None)) == "Evil (id 7)"
+    assert display_name(SimpleNamespace(id=7, first_name="​‮", last_name=None, username=None)) == "без імені (id 7)"
 
 
 def test_non_image_is_never_uploaded():

@@ -8,7 +8,7 @@
 </head>
 <body>
 <h1>Privacy Policy — Receipt Bot</h1>
-<p><em>Last updated: 25 September 2026</em></p>
+<p><em>Last updated: 27 September 2026</em></p>
 
 <h2>What we collect</h2>
 <ul>
@@ -22,8 +22,8 @@ who submitted a receipt (also written into the Sheet row).</li>
 
 <h2>How it is used</h2>
 <p>To read the total amount, a downscaled copy of the photo is sent to an AI model provider:
-<b>Cloudflare Workers AI</b>, or <b>Groq</b> if Cloudflare is unavailable. Under their terms the data is not used to train
-models; providers may keep short-lived logs to prevent abuse.</p>
+<b>Cloudflare Workers AI</b>, or <b>Groq</b> if Cloudflare is unavailable. Under their terms at the time of writing
+the data is not used to train models; providers may keep short-lived logs to prevent abuse.</p>
 <p>After you confirm the amount, the original photo is stored in the team's Google Drive folder, and a row
 (date added, receipt date, sender name and Telegram ID, Google email, amount, currency, link to the photo,
 whether the amount was typed in, receipt ID) is added to the team's Google Sheet.
@@ -39,6 +39,8 @@ including the Limited Use requirements.</p>
 <h2>Retention and deletion</h2>
 <p>The link between your Telegram account and Google email is kept until you send /logout or ask to remove it.
 Receipts remain in the team's Sheet and Drive, managed by the team. To delete your data, contact the address below.</p>
+<p>The server's technical log records Telegram user IDs with the time of events such as signing in, and receipt IDs.
+It contains no photos, tokens or email addresses, and the server rotates it automatically.</p>
 
 <h2>Contact</h2>
 <p>sidorovdenys9@gmail.com</p>

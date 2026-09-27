@@ -159,6 +159,20 @@ def test_prepare_image_rejects_too_many_pixels_before_decoding(monkeypatch):
         prepare_image(buf.getvalue())
 
 
+def test_prepare_image_rejects_a_scan_bomb_before_decoding():
+    # a progressive JPEG with thousands of scans would hold the only decode slot for minutes
+    bomb = b"\xff\xd8" + b"\xff\xda\x00\x02" * (recognition.MAX_JPEG_SCANS + 1) + b"\xff\xd9"
+    with pytest.raises(NotAnImage, match="scans"):
+        prepare_image(bomb)
+
+
+def test_prepare_image_takes_an_ordinary_progressive_jpeg():
+    buf = io.BytesIO()
+    Image.new("RGB", (400, 300), "white").save(buf, "JPEG", progressive=True)
+    assert buf.getvalue().count(b"\xff\xda") > 1  # really progressive: several scans
+    assert prepare_image(buf.getvalue())[:2] == b"\xff\xd8"
+
+
 def test_prepare_image_rejects_truncated_content_rich_jpeg():
     from PIL import ImageDraw
     img = Image.new("RGB", (1500, 2000), "white")

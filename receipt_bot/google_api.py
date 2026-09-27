@@ -177,6 +177,7 @@ class GoogleStore:
         self._permissions_at = float("-inf")  # monotonic() starts at boot: 0.0 would look "fresh" for a minute
         self._header_ok = False
         self._sa_lock = asyncio.Lock()
+        self._permissions_lock = asyncio.Lock()
 
     # --- tokens ---
 
@@ -205,8 +206,11 @@ class GoogleStore:
         """Edit access shared with this very person. Not "anyone with the link" (the bot is public) and not
         a whole domain (a personal account can use a company address). Groups aren't expanded (see README)."""
         if time.monotonic() - self._permissions_at > PERMISSIONS_TTL:
-            self._permissions = await self._list_permissions()
-            self._permissions_at = time.monotonic()
+            # One refresh at a time: an album used to fire ten, and a late old answer restarted the minute.
+            async with self._permissions_lock:
+                if time.monotonic() - self._permissions_at > PERMISSIONS_TTL:
+                    self._permissions = await self._list_permissions()
+                    self._permissions_at = time.monotonic()
         email = email.lower()
         return any(p.get("type") == "user" and p.get("role") in EDIT_ROLES and not p.get("deleted")
                    and p.get("emailAddress", "").lower() == email for p in self._permissions)
@@ -230,7 +234,7 @@ class GoogleStore:
 
     async def save_receipt(self, photo: bytes, mime: str, file_name: str, row: ReceiptRow) -> str:
         """Photo to Drive, then the row to Sheets; returns the photo link. Never leaves a row without its photo:
-        if the append failed for sure, the photo is deleted; if the outcome is unknown, we look for the row's ID."""
+        if the append failed for sure, the photo is deleted; if the outcome is unknown, the photo stays."""
         try:
             file_id, link = await self._upload(photo, mime, file_name)
         except GoogleUnsure:
@@ -238,14 +242,16 @@ class GoogleStore:
             raise
         try:
             await self._append(row.cells(link))
-        except Exception as e:
-            if isinstance(e, GoogleUnsure):
-                try:
-                    if await self._row_written(row.receipt_id):
-                        return link  # Google saved it, only the reply got lost
-                except GoogleError:
-                    log.error("receipt %s: can't tell if the row was saved, photo %s kept", row.receipt_id, file_id)
-                    raise e
+        except GoogleUnsure:
+            try:
+                if await self._row_written(row.receipt_id):
+                    return link  # Google saved it, only the reply got lost
+            except GoogleError:
+                pass
+            # The row may still land after our lookup: a spare photo beats a row with a dead link.
+            log.error("receipt %s: row not confirmed, photo %s kept", row.receipt_id, file_id)
+            raise
+        except Exception:
             await self._delete(file_id)
             raise
         return link

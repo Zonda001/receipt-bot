@@ -30,8 +30,8 @@ from receipt_bot.google_api import (
     GoogleError, GoogleLogin, GoogleStore, GoogleUnsure, LoginDenied, LoginExpired, ReceiptRow,
 )
 from receipt_bot.recognition import (
-    RATE_LIMIT_WAIT_MAX, NotAnImage, RateLimited, Recognition, RecognitionError, RecognizerChain, parse_amount,
-    validate_image,
+    RATE_LIMIT_WAIT_MAX, NotAnImage, RateLimited, Recognition, RecognitionError, RecognizerChain, clean_text,
+    parse_amount, validate_image,
 )
 from receipt_bot.storage import Users
 
@@ -48,6 +48,7 @@ LOGINS_PER_MINUTE = 3
 LOGINS_GLOBAL_PER_MINUTE = 20
 REPLIES_PER_MINUTE = 10
 SAVES_PER_DAY = 100
+SAVE_BYTES_PER_DAY = 200 * 1024 * 1024  # ~20 full-size files or ~1000 phone photos a day per Google account
 IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
 
@@ -93,6 +94,7 @@ class Pending:
     note: str = ""      # why recognition failed (then only manual entry is left)
     sender: str = ""    # Telegram name, for the sheet
     mime: str = "image/jpeg"
+    size: int = 0       # bytes as Telegram reports them; 0 if it didn't
     status: str = "pending"  # pending -> processing -> done | cancelled
 
 
@@ -104,7 +106,7 @@ class PendingStore:
 
     def add(self, item: Pending) -> str:
         self._evict()
-        rid = secrets.token_hex(4)
+        rid = secrets.token_hex(8)  # also the row's ID in the sheet: 32 bits could one day match an old row
         self._items[rid] = item
         return rid
 
@@ -140,41 +142,46 @@ class RateLimiter:
 
 
 class DailyQuota:
-    """Recognitions per day for the whole team: the provider's free tier has a daily ceiling."""
+    """Recognitions per day, for the whole team (free-tier ceiling) and per Google account (one can't eat it all)."""
 
-    def __init__(self, limit: int) -> None:
-        self._limit = limit
+    def __init__(self, limit: int, per_person: int) -> None:
+        self._limit, self._per_person = limit, per_person
         self._day = date.today()
         self._used = 0
+        self._by_person: dict[str, int] = defaultdict(int)
 
-    def take(self) -> bool:
+    def take(self, person: str) -> bool:
         if date.today() != self._day:
-            self._day, self._used = date.today(), 0
-        if self._used >= self._limit:
+            self._day, self._used, self._by_person = date.today(), 0, defaultdict(int)
+        if self._used >= self._limit or self._by_person[person] >= self._per_person:
             return False
         self._used += 1
+        self._by_person[person] += 1
         return True
 
-    def give_back(self) -> None:
+    def give_back(self, person: str) -> None:
         """Give one back if the request never reached the model (broken file, 429)."""
-        if date.today() == self._day and self._used > 0:
+        if date.today() == self._day and self._used > 0 and self._by_person[person] > 0:
             self._used -= 1
+            self._by_person[person] -= 1
 
 
 class SaveLimit:
-    """Saves per person per day: even with someone else's login code, the owner's Drive can't be flooded."""
+    """Saves and photo bytes per Google account per day: the owner's Drive can't be flooded, whatever the Telegram."""
 
-    def __init__(self, per_day: int) -> None:
-        self._per_day = per_day
+    def __init__(self, per_day: int, bytes_per_day: int) -> None:
+        self._per_day, self._bytes_per_day = per_day, bytes_per_day
         self._day = date.today()
-        self._used: dict[int, int] = defaultdict(int)
+        self._count: dict[str, int] = defaultdict(int)
+        self._bytes: dict[str, int] = defaultdict(int)
 
-    def take(self, user_id: int) -> bool:
+    def take(self, email: str, size: int) -> bool:
         if date.today() != self._day:
-            self._day, self._used = date.today(), defaultdict(int)
-        if self._used[user_id] >= self._per_day:
+            self._day, self._count, self._bytes = date.today(), defaultdict(int), defaultdict(int)
+        if self._count[email] >= self._per_day or self._bytes[email] + size > self._bytes_per_day:
             return False
-        self._used[user_id] += 1
+        self._count[email] += 1
+        self._bytes[email] += size
         return True
 
 
@@ -252,8 +259,8 @@ def now_local() -> datetime:
 
 
 def display_name(user) -> str:
-    # Numeric id, because people pick their own names.
-    name = " ".join(filter(None, [user.first_name, user.last_name])) or "без імені"
+    # Numeric id, because people pick their own names; cleaned, so an RLO in a name can't scramble the id.
+    name = clean_text(" ".join(filter(None, [user.first_name, user.last_name]))) or "без імені"
     return f"{name} (@{user.username}, id {user.id})" if user.username else f"{name} (id {user.id})"
 
 
@@ -412,6 +419,7 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, recognizer: Re
     if problem := await access_problem(user_id, users, google):
         await message.answer(problem)
         return
+    email = users.email(user_id)
     await release_manual(bot, state, pending)
 
     if message.document:
@@ -453,19 +461,19 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, recognizer: Re
     rec: Recognition | None = None
     note = ""  # non-empty: recognition failed, offer manual entry
     try:
-        if quota.take():
+        if quota.take(email):
             rec = await recognizer.recognize(image)
         else:
             note = "Ліміт автоматичного розпізнавання на сьогодні вичерпано — суму можна ввести вручну."
     except NotAnImage:
-        quota.give_back()  # the request never reached the model
+        quota.give_back(email)  # the request never reached the model
         await status.edit_text(
             "Не вдалося відкрити зображення (пошкоджене, завелике або формат не підтримується). "
             "Надішли чек як звичайне фото, не файлом.")
         return
     except RateLimited as e:
         if not e.spent:
-            quota.give_back()  # 429 on the very first request: the model never saw the receipt
+            quota.give_back(email)  # 429 on the very first request: the model never saw the receipt
         log.warning("rate limited, retry after %.0fs", e.retry_after)
         note = rate_limited_note(e.retry_after)
     except RecognitionError as e:
@@ -484,7 +492,7 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, recognizer: Re
     mime = message.document.mime_type if message.document else "image/jpeg"
     item = Pending(user_id=user_id, file_id=file.file_id, recognition=rec, created=time.time(),
                    chat_id=status.chat.id, msg_id=status.message_id, note=note,
-                   sender=display_name(message.from_user), mime=mime)
+                   sender=display_name(message.from_user), mime=mime, size=file.file_size or 0)
     rid = pending.add(item)
     await edit_receipt(bot, item, *result_view(rid, rec, note))
 
@@ -525,8 +533,9 @@ async def save(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: bool,
     try:
         if not await google.has_access(email):
             raise NotSaved(f"Акаунт {email} більше не має доступу до таблиці.")
-        if not saves.take(item.user_id):
-            raise NotSaved(f"Ліміт {SAVES_PER_DAY} записів на добу вичерпано.")
+        if not saves.take(email, item.size or MAX_FILE_BYTES):  # unknown size: count the worst case
+            raise NotSaved(f"Денний ліміт записів для {email} вичерпано "
+                           f"({SAVES_PER_DAY} чеків або {SAVE_BYTES_PER_DAY // 2**20} МБ фото).")
         photo = (await bot.download(item.file_id)).read()
         await validate_image(photo)  # only a real photo goes to Drive, even if recognition was skipped
         now = now_local()

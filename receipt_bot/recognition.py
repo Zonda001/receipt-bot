@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 
 MAX_SIDE = 1280                      # longer photo side before sending: fewer tokens, text still readable
 MAX_PIXELS = 40_000_000              # guards against decompression bombs with huge resolutions
+MAX_JPEG_SCANS = 64                  # phones write ~10; thousands of progressive scans keep libjpeg busy for minutes
 IMAGE_FORMATS = ("JPEG", "PNG", "WEBP")  # what phones actually send; other Pillow formats are just attack surface
 MAX_AMOUNT = Decimal("10000000")     # 10 million: anything bigger is a recognition error
 MAX_COMPLETION_TOKENS = 400          # without this Groq reserves ~3.4K tokens/min per request and returns 429
@@ -215,9 +216,9 @@ def _parse_date(value: str | None) -> date | None:
     return parsed
 
 
-def _clean_label(label: str) -> str:
-    """No invisible or control characters (RLO etc.): a label from a photo must not pose as another button."""
-    visible = "".join(ch for ch in label if unicodedata.category(ch) not in {"Cc", "Cf", "Co", "Cs", "Zl", "Zp"})
+def clean_text(text: str) -> str:
+    """No invisible or control characters (RLO etc.): a label from a photo or a Telegram name can't pose as another."""
+    visible = "".join(ch for ch in text if unicodedata.category(ch) not in {"Cc", "Cf", "Co", "Cs", "Zl", "Zp"})
     return " ".join(visible.split())
 
 
@@ -255,7 +256,7 @@ def normalize(answer: _ModelAnswer) -> Recognition:
         return Recognition(is_receipt=False)
 
     # Classify the full label (cut only for the button); the button cap applies after the filter.
-    rows = [(_clean_label(c.label), to_amount(c.amount)) for c in answer.candidates[:4 * MAX_CANDIDATES]]
+    rows = [(clean_text(c.label), to_amount(c.amount)) for c in answer.candidates[:4 * MAX_CANDIDATES]]
     rows = [(label, amount) for label, amount in rows if amount is not None]
 
     total = to_amount(answer.total)
@@ -298,6 +299,9 @@ def normalize(answer: _ModelAnswer) -> Recognition:
 
 def prepare_image(data: bytes) -> bytes:
     """Any image -> JPEG with correct orientation and the longer side <= MAX_SIDE."""
+    # Counted before decoding: every scan starts with FF DA, and compressed data never contains those two bytes.
+    if data[:2] == b"\xff\xd8" and data.count(b"\xff\xda") > MAX_JPEG_SCANS:
+        raise NotAnImage("too many JPEG scans")
     try:
         with Image.open(io.BytesIO(data), formats=IMAGE_FORMATS) as img:
             # Check the size BEFORE draft(): draft shrinks img.size, but a progressive JPEG
@@ -435,7 +439,8 @@ class Recognizer:
                         continue
                     raise self._failed(f"HTTP {response.status_code}")
                 if response.status_code != 200:
-                    raise RecognitionError(f"HTTP {response.status_code}: {response.text[:200]}")
+                    # repr: the body may echo text from the photo, and a newline would fake a journal line
+                    raise RecognitionError(f"HTTP {response.status_code}: {response.text[:200]!r}")
                 try:
                     return response.json()
                 except ValueError as e:

@@ -80,9 +80,9 @@ flowchart LR
 - **The service account writes the row, the folder owner uploads the photo.** A service account on a regular Gmail
   has no Drive quota (`403 storage quota`). The `drive.file` scope sees only files created by the app. So that the
   owner's refresh token doesn't expire in 7 days, the OAuth app is published (In production).
-- **No row without a photo.** The photo is uploaded first, then the row is written. If the row fails, the photo is
-  deleted. If Google didn't answer in time, the bot looks the row up by the receipt ID and only then decides what to
-  do with the photo.
+- **No row without a photo.** The photo is uploaded first, then the row is written. If Google clearly refused (4xx),
+  the photo is deleted. If it answered 5xx or didn't answer in time, the bot looks the row up by the receipt ID, and
+  if it isn't there, keeps the photo: the row may still land later, and a spare photo beats a row with a dead link.
 - **SQLite holds only the Telegram ↔ email link.** Receipts awaiting confirmation live in memory, so after a restart
   old buttons answer "receipt expired". Cost: an unconfirmed receipt then has to be sent again. In return, the
   database has no half-written states to untangle.
@@ -133,6 +133,7 @@ directory. For anything else, adjust `User`, `WorkingDirectory`, `ExecStart` and
 | `LLM_REASONING_EFFORT`, `LLM_EXTRA_BODY` | How to turn off the model's "thinking": every provider does it differently, examples in `.env.example` |
 | `LLM_FALLBACK_*` | Fallback provider, same fields. An empty `LLM_FALLBACK_BASE_URL` turns it off |
 | `DAILY_RECOGNITIONS` | Daily recognition cap for the whole team (a safety net; 300) |
+| `DAILY_RECOGNITIONS_PER_PERSON` | How many of those one Google account may use a day (100) |
 | `DB_PATH` | SQLite database (`data/bot.db`) |
 
 ## Setting up authorization
@@ -144,7 +145,8 @@ In Google Cloud Console:
    roles on the project.
 3. **Sheet.** Create a sheet and give the service account **editor** rights. Put the ID from the URL into `SHEET_ID`;
    the bot writes the header itself. Give everyone who will send receipts **edit rights personally**, not through a
-   group and not "anyone with the link" (why, see [limitations](#known-limitations)).
+   group and not "anyone with the link" (why, see [limitations](#known-limitations)). In the Share dialog → ⚙, untick
+   "Editors can change permissions and share": otherwise any editor can let an outsider into the bot.
 4. **OAuth client** of type **TVs and Limited Input devices**. Download the JSON to `GOOGLE_OAUTH_CLIENT_FILE`.
 5. **Google Auth Platform → Branding:** set the home page, the privacy policy (here it's GitHub Pages from `docs/`)
    and the authorized domain. Then **Audience → Publish app**. Without publishing, the owner's refresh token lives
@@ -174,16 +176,16 @@ is unlinked and gets a warning.
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                                          # 200 tests, no network: Google and the providers are fakes
+pytest                                          # 212 tests, no network: Google and the providers are fakes
 ```
 
 | File | What it checks |
 |---|---|
-| `tests/test_recognition.py` | Validation of the model's answer: amounts, currency, date. VAT, change and cash are never the total, a cap on the number of buttons. The photo is checked before sending: formats, "bombs" with a giant resolution, truncated JPEGs |
-| `tests/test_providers.py` | Primary and fallback provider: daily limit, provider pause after a failure, `retry-after`, the queue. Bank fee (the "with fee" button, no double counting). Polish and English labels. The second look at photos without amounts: the verdict, seven kinds of failure without blocking the provider, skipping instead of waiting, the main request stays unchanged |
-| `tests/test_google.py` | Device flow (waiting, denial, expired code, unverified email). Edit rights: "anyone with the link" doesn't count. Photo, then row, and compensation: Drive down, Sheets down, a timeout with and without a row. One email, one Telegram. Save limit. Names like `=IMPORTXML(...)` stay text. `owner_login` |
+| `tests/test_recognition.py` | Validation of the model's answer: amounts, currency, date. VAT, change and cash are never the total, a cap on the number of buttons. The photo is checked before sending: formats, "bombs" with a giant resolution or thousands of scans, truncated JPEGs |
+| `tests/test_providers.py` | Primary and fallback provider: daily limit, provider pause after a failure, `retry-after`, the queue. Bank fee (the "with fee" button, no double counting). Polish and English labels. The second look at photos without amounts: the verdict, seven kinds of failure without blocking the provider, skipping instead of waiting, the main request stays unchanged. A provider's error text can't fake a journal line |
+| `tests/test_google.py` | Device flow (waiting, denial, expired code, unverified email). Edit rights: "anyone with the link" doesn't count. Photo, then row, and compensation: Drive down, Sheets refusing (4xx, the photo is deleted), 5xx or a timeout (the photo stays). Parallel access checks make one request. One email, one Telegram. Save and byte limits per Google account. Names like `=IMPORTXML(...)` stay text, and an RLO in a name can't hide the ID. `owner_login` |
 | `tests/test_concurrency.py` | Races: two quick "type manually" taps on different receipts. Daily quota accounting when the provider answers 429 |
-| `tests/test_handlers_and_config.py` | The command menu matches the real handlers. Login buttons. The login code gets through even without buttons, and if it doesn't get through at all, the login is cancelled. Config errors don't print values. "Not a receipt" leaves only manual entry and cancel |
+| `tests/test_handlers_and_config.py` | The command menu matches the real handlers. Login buttons. The login code gets through even without buttons, and if it doesn't get through at all, the login is cancelled. Config errors don't print values. "Not a receipt" leaves only manual entry and cancel. A daily recognition share per person |
 | `tests/test_logging.py` | Tokens are stripped from the log, tracebacks included |
 
 ### Recognition on real documents
@@ -225,18 +227,18 @@ fallback (~80 a day). Only a person catches a wrong digit, so the bot never save
 |---|---|---|---|
 | Not signed in | "Sign in with Google first" | nothing | live 26.09 |
 | Account without edit rights | "Account X has no access…" | nothing, the email isn't stored | live 26.09, `test_access_needs_edit_rights` |
-| Not a photo or a broken file | refused before the model | nothing | `test_prepare_image_*`, `test_non_image_is_never_uploaded` |
+| Not a photo, a broken or a "heavy" file | refused before the model | nothing | `test_prepare_image_*`, `test_non_image_is_never_uploaded` |
 | Not a receipt | "Doesn't look like a receipt" + manual entry | nothing | live 27.09 (7 of 7), `test_photo_without_amounts_that_is_not_a_document_is_not_a_receipt` |
 | Amount not recognized | "Couldn't find the amount…" + manual entry | nothing until confirmed | on the real model 27.09 (top of a receipt without amounts), `test_unreadable_document_keeps_manual_entry_date_and_currency` |
 | Several amounts | buttons to choose | nothing until chosen | live 27.09 (amount or amount with fee), `test_no_total_keeps_candidates_for_choice` |
 | Model down or out of quota | fallback provider; an honest text about how long to wait | nothing | `test_chain_*`, live 25.09 |
 | Drive down | "Couldn't save to Google" | nothing | `test_drive_failure_writes_nothing` |
-| Drive ok, Sheets down | the same | the photo is deleted | `test_sheet_failure_removes_the_photo` |
-| Google didn't answer in time | either "Saved" or "check the sheet before retrying" | no duplicates | `test_timeout_*` |
+| Drive ok, Sheets refused (4xx) | the same | the photo is deleted | `test_sheet_failure_removes_the_photo` |
+| Sheets 5xx or Google didn't answer in time | either "Saved" or "check the sheet before retrying" | the row is looked up by ID; if it isn't there, the photo stays | `test_sheet_5xx_keeps_the_photo`, `test_timeout_*` |
 | Manual amount not a number or ≤ 0 | "Enter a number" | nothing | live 27.09, `test_parse_amount_rejects` |
 | "Confirm" tapped twice | "Already processing…" | one row | only in code: the status changes before the first `await`, no automated test |
 | An old button (after a restart) | "Receipt expired" | nothing | live 27.09 (bot restart), no automated test |
-| Flooding | "Too many…" | — | `test_save_limit_per_user` and others |
+| Flooding or a daily limit | "Too many…" or "limit reached" | — | `test_save_limit_*`, `test_one_person_cannot_use_up_the_team_quota` |
 
 ## Security
 
@@ -245,21 +247,27 @@ fallback (~80 a day). Only a person catches a wrong digit, so the bot never save
 - The log: the bot token and provider keys are stripped even from tracebacks. Google errors are logged with the code
   only, without the response text. Emails of people without access don't get into the log.
 - The bot works only in private chats: a `/login` code sent to a group could be entered by anyone.
-- Limits: 20 photos a minute and 100 saves a day per person, 300 recognitions a day for the whole team, 3 `/login`
-  attempts a minute per person and 20 for everyone.
+- Limits: 20 photos a minute per Telegram account; per Google account a day, 100 saves, 200 MB of photos and 100
+  recognitions; 300 recognitions a day for the whole team; 3 `/login` attempts a minute per person and 20 for
+  everyone.
 - systemd: writing is allowed only to `data/`, no new privileges, a system call filter and a memory ceiling.
-- There were several rounds of security review. `pip-audit` finds no vulnerabilities, Dependabot is on.
+- There were several rounds of security review, the last one on 27.09 a full one: the code (by two independent
+  agents), the VM, the git history, GitHub and the dependencies. No critical or high findings; the medium ones are
+  fixed, the rest are fixed or described below. Dependencies were checked against the OSV database (no known
+  vulnerabilities), Dependabot is on.
 
 ## Known limitations
 
 - **Sign-in by code (device flow).** If a person enters a code someone forwarded to them, the bot links someone
   else's Telegram to their account. What limits this: one email, one Telegram (the previous account is unlinked and
-  warned), every row in the sheet has the sender's Telegram ID, no more than 100 saves per person a day, and the bot
-  always names the account you signed in with.
+  warned), every row in the sheet has the sender's Telegram ID, a Google account gets no more than 100 saves and
+  200 MB of photos a day, and the bot always names the account you signed in with.
 - **Access** comes only from edit rights given to a specific person. Google groups, domain-wide access (a personal
-  account may have a corporate address) and "anyone with the link" (the bot is public) don't count.
-- **If Google didn't answer in time**, the bot looks the row up by the receipt ID. If that fails too, it asks to check
-  the sheet before retrying and doesn't delete the photo.
+  account may have a corporate address) and "anyone with the link" (the bot is public) don't count. Revoking access
+  takes effect within a minute: that's how long the bot caches the sheet's permissions.
+- **If Google answered 5xx or didn't answer in time**, the bot looks the row up by the receipt ID. If it isn't there,
+  the bot keeps the photo and asks to check the sheet before retrying. So in a rare case the folder gets a spare
+  photo without a row (its ID is in the log).
 - **A wrong digit.** The model can get a digit wrong (2 of 24 in the measurement), so the amount always goes to
   confirmation.
 - **Free limits.** Cloudflare gives ~1100 receipts a day, Groq ~80. `DAILY_RECOGNITIONS` keeps a cap for the whole
@@ -268,8 +276,20 @@ fallback (~80 a day). Only a person catches a wrong digit, so the bot never save
 - **Duplicates.** The same receipt can be saved twice: the bot doesn't compare new receipts with the sheet. On 27.09
   one receipt was deliberately saved three times (79.00 by hand and 79.16 twice). The next step: a "a similar receipt
   is already there" warning based on the amount and the receipt date.
-- **Receipts awaiting confirmation** are lost on restart: they have to be sent again.
+- **Receipts awaiting confirmation** are lost on restart: they have to be sent again. **The limit counters** also
+  live in memory and reset on restart.
 - **The folder owner's token.** If the owner revokes the app's access, photos stop uploading. The fix is running
-  `python -m receipt_bot.owner_login` again and restarting the bot.
+  `python -m receipt_bot.owner_login` again and restarting the bot. Google keeps at most 100 refresh tokens per
+  account and OAuth client, so an owner who signs in to the bot with `/login` a hundred times pushes this token out
+  too. A separate OAuth client for `owner_login` is the sturdier setup.
+- **`/logout` in the middle of a sign-in.** If you log out exactly when Google has confirmed the sign-in and the bot
+  is still checking access, the link is written anyway. The window is a fraction of a second, and another `/logout`
+  removes it.
+- **The shared `/login` cap** (20 a minute for everyone). A few accounts can keep it busy, and then sign-in is
+  unavailable for a minute to your own people too. Those already signed in aren't affected.
+- **CSV export.** In the sheet everything is stored as text (RAW), but Excel will treat a name starting with `=` as a
+  formula when opening a CSV. Open CSV exports as text.
+- **Dependencies** are given as version ranges, without a lock file: `pip install` on a new server may pick newer
+  versions. The tested versions are the ones on the VM (`pip freeze`).
 - **The bot process** runs as the `ubuntu` user, though under strict systemd restrictions (see
   `deploy/receipt-bot.service`). A dedicated system user is the next step.

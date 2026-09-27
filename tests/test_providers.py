@@ -443,3 +443,19 @@ def test_second_look_leaves_the_measured_request_alone():
     assert check["response_format"]["json_schema"]["schema"] == recognition.CHECK_SCHEMA
     assert check["chat_template_kwargs"] == {"enable_thinking": False}  # provider options still apply
     assert check["messages"][1]["content"][1] == body["messages"][1]["content"][1]  # the same photo
+
+
+def test_provider_error_text_cannot_fake_journal_lines():
+    # a 400 body can echo text from the photo; the error goes to the journal as one escaped line
+    async def scenario():
+        rec = with_transport(Recognizer("http://x", "m", "k"),
+                             lambda r: httpx.Response(400, text="bad\nINFO receipt_bot: fake line"))
+        try:
+            with pytest.raises(RecognitionError) as err:
+                await rec.recognize_prepared(jpeg())
+            return str(err.value)
+        finally:
+            await rec.close()
+
+    text = asyncio.run(scenario())
+    assert "\n" not in text and "fake line" in text
