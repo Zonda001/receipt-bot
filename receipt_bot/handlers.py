@@ -9,7 +9,7 @@ import secrets
 import time
 from collections import defaultdict, deque
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
 from urllib.parse import urlparse
@@ -395,6 +395,11 @@ async def on_logout(message: Message, users: Users, logins: dict[int, asyncio.Ta
     await message.answer("Вийшов. Щоб знову надсилати чеки — /login")
 
 
+def not_a_receipt(rec: Recognition) -> Recognition:
+    """No amount buttons, but manual entry stays (the model can be wrong) and keeps the date it read."""
+    return replace(rec, is_receipt=True, candidates=[], has_total=False)
+
+
 @router.message(F.photo | F.document)
 async def on_photo(message: Message, bot: Bot, state: FSMContext, recognizer: RecognizerChain,
                    pending: PendingStore, limiter: RateLimiter, quota: DailyQuota,
@@ -471,8 +476,8 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, recognizer: Re
         note = "Не вдалося розпізнати чек. Спробуй ще раз пізніше або введи суму вручну."
 
     if rec is not None and not rec.is_receipt:
-        note = "Не схоже на чек чи квитанцію про оплату."  # the model can be wrong, so manual entry stays
-        rec = None
+        note = "Не схоже на чек чи квитанцію про оплату."
+        rec = not_a_receipt(rec)
     if rec is None:
         rec = Recognition(is_receipt=True)  # no amounts: only "enter manually" and "cancel" are left
 

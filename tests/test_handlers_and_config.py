@@ -186,3 +186,22 @@ def test_undelivered_login_code_stops_the_login():
         raise TelegramForbiddenError(SendMessage(chat_id=1, text=text), "Forbidden: bot was blocked by the user")
 
     assert not run_login(answer)
+
+
+# --- "not a receipt" ---
+
+def test_not_a_receipt_keeps_manual_entry_with_the_date_and_currency():
+    from datetime import date
+    from decimal import Decimal
+
+    from receipt_bot.handlers import not_a_receipt, result_view
+    from receipt_bot.recognition import Candidate, Recognition
+
+    rec = not_a_receipt(Recognition(is_receipt=False, candidates=[Candidate("Сума", Decimal("5.00"))], has_total=True,
+                                    currency="PLN", receipt_date=date(2026, 9, 24)))
+    assert rec.is_receipt and rec.candidates == [] and not rec.has_total
+    assert rec.currency == "PLN" and rec.receipt_date == date(2026, 9, 24)  # a typed amount keeps what was read
+    text, kb = result_view("r1", rec, "Не схоже на чек чи квитанцію про оплату.")
+    buttons = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert text.startswith("Не схоже на чек") and len(buttons) == 2  # only "enter manually" and "cancel"
+    assert all(":ok:" not in data for data in buttons)

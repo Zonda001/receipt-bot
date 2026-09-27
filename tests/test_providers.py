@@ -1,6 +1,10 @@
 """Bank fees, labels in other languages, the provider queue and the fallback provider."""
 import asyncio
+import copy
 import io
+import json
+import time
+from datetime import date
 from decimal import Decimal
 
 import httpx
@@ -10,7 +14,7 @@ from PIL import Image
 import receipt_bot.recognition as recognition
 from receipt_bot.handlers import rate_limited_note
 from receipt_bot.recognition import (
-    MAX_QUEUE, RESPONSE_SCHEMA, NotAnImage, RateLimited, RecognitionError, Recognizer, RecognizerChain,
+    MAX_QUEUE, RESPONSE_SCHEMA, NotAnImage, RateLimited, Recognition, RecognitionError, Recognizer, RecognizerChain,
     _Candidate, _ModelAnswer, is_fee, is_not_total, normalize,
 )
 
@@ -312,3 +316,130 @@ def test_extra_body_ok():
     assert parse_extra_body('{"chat_template_kwargs": {"enable_thinking": false}}') == {
         "chat_template_kwargs": {"enable_thinking": False}}
     assert parse_extra_body("  ") is None
+
+
+# --- second look when no amount was found ---
+
+def check_reply(content) -> httpx.Response:
+    return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+
+def network_down() -> httpx.Response:
+    raise httpx.ConnectError("down")
+
+
+def two_step(main: _ModelAnswer, check, calls: list):
+    """The recognition request gets `main`, the document check gets `check` (JSON text or a response factory)."""
+    def handler(request):
+        name = json.loads(request.read())["response_format"]["json_schema"]["name"]
+        calls.append(name)
+        if name == "receipt":
+            return check_reply(main.model_dump_json())
+        return check() if callable(check) else check_reply(check)
+    return handler
+
+
+def recognize_with(handler):
+    """-> (result, recognizer): the recognizer is closed, but its cooldown and limits can still be read."""
+    async def scenario():
+        rec = with_transport(Recognizer("http://x", "m", "k"), handler)
+        try:
+            return await rec.recognize_prepared(jpeg()), rec
+        finally:
+            await rec.close()
+
+    return asyncio.run(scenario())
+
+
+def no_amounts(is_receipt=True, currency="UAH", date_=None) -> _ModelAnswer:
+    return _ModelAnswer(is_receipt=is_receipt, total=None, currency=currency, date=date_, candidates=[])
+
+
+def test_photo_without_amounts_that_is_not_a_document_is_not_a_receipt():
+    calls = []
+    rec, _ = recognize_with(two_step(no_amounts(), '{"shows": "earphones", "is_payment_document": false}', calls))
+    assert not rec.is_receipt and calls == ["receipt", "document_check"]
+
+
+def test_not_a_document_keeps_the_date_and_currency_it_read():
+    first = no_amounts(currency="PLN", date_="2026-09-24")
+    rec, _ = recognize_with(two_step(first, '{"shows": "a desk", "is_payment_document": false}', []))
+    assert not rec.is_receipt and rec.currency == "PLN" and rec.receipt_date == date(2026, 9, 24)
+
+
+def test_unreadable_document_keeps_manual_entry_date_and_currency():
+    calls = []
+    first = no_amounts(currency="PLN", date_="2026-09-24")
+    rec, _ = recognize_with(two_step(first, '{"shows": "a blurry receipt", "is_payment_document": true}', calls))
+    assert rec.is_receipt and rec.candidates == [] and calls == ["receipt", "document_check"]
+    assert rec.currency == "PLN" and rec.receipt_date == date(2026, 9, 24)
+
+
+def test_cut_off_receipt_is_not_called_not_a_receipt():
+    # Live 27.09: the top of a real receipt without amounts got is_receipt=false from the main request.
+    calls = []
+    rec, _ = recognize_with(two_step(no_amounts(is_receipt=False, currency=None),
+                                     '{"shows": "top of a shop receipt", "is_payment_document": true}', calls))
+    assert rec.is_receipt and rec.candidates == [] and calls == ["receipt", "document_check"]
+
+
+FAILED_CHECKS = {
+    "http-400": lambda: httpx.Response(400, text="bad request"),
+    "http-500": lambda: httpx.Response(500),
+    "http-429": lambda: httpx.Response(429),
+    "network": network_down,
+    "null-content": lambda: check_reply(None),
+    "not-json": "not json",
+    "no-verdict": '{"shows": "x"}',
+}
+
+
+@pytest.mark.parametrize("verdict", [True, False])
+@pytest.mark.parametrize("check", FAILED_CHECKS.values(), ids=FAILED_CHECKS.keys())
+def test_failed_second_look_keeps_the_first_answer_and_the_provider(check, verdict):
+    calls = []
+    rec, provider = recognize_with(two_step(no_amounts(is_receipt=verdict), check, calls))
+    assert rec.is_receipt is verdict and rec.candidates == [] and calls == ["receipt", "document_check"]
+    # an optional request: no cooldown, so the next photo still goes to this provider, not to the fallback
+    assert provider._down_until == 0.0 and provider.blocked_for() == 0.0
+
+
+def test_second_look_is_skipped_rather_than_waited_for():
+    calls = []
+
+    async def scenario():
+        rec = with_transport(Recognizer("http://x", "m", "k"),
+                             two_step(no_amounts(), '{"shows": "x", "is_payment_document": false}', calls))
+        rec._remember_budget(httpx.Headers({"x-ratelimit-remaining-tokens": "0", "x-ratelimit-limit-tokens": "8000"}))
+        try:
+            return await rec._check_document(jpeg(), Recognition(is_receipt=True))
+        finally:
+            await rec.close()
+
+    started = time.monotonic()
+    result = asyncio.run(scenario())
+    assert result.is_receipt and calls == [] and time.monotonic() - started < 5  # waiting would take ~20 s
+
+
+def test_found_amount_needs_no_second_look():
+    calls = []
+    rec, _ = recognize_with(two_step(answer(total=10, candidates=[("СУМА", 10)]), "unused", calls))
+    assert rec.total == Decimal("10.00") and calls == ["receipt"]
+
+
+def test_second_look_leaves_the_measured_request_alone():
+    rec = Recognizer("http://x", "m", "k", extra_body={"chat_template_kwargs": {"enable_thinking": False}})
+    img = jpeg()
+    schema, extra = copy.deepcopy(RESPONSE_SCHEMA), copy.deepcopy(rec._extra_body)
+    main = json.dumps(rec._request_body(img), sort_keys=True)
+    check = rec._check_body(img)
+    rec._check_body(img)
+    assert json.dumps(rec._request_body(img), sort_keys=True) == main  # nothing shared was mutated
+    assert RESPONSE_SCHEMA == schema and rec._extra_body == extra
+    body = rec._request_body(img)
+    assert body["messages"][0]["content"] == recognition.SYSTEM_PROMPT  # the measured prompt and schema
+    assert body["response_format"]["json_schema"] == {"name": "receipt", "strict": True, "schema": RESPONSE_SCHEMA}
+    assert check["messages"][0]["content"] == recognition.CHECK_PROMPT
+    assert check["response_format"]["json_schema"]["schema"] == recognition.CHECK_SCHEMA
+    assert check["chat_template_kwargs"] == {"enable_thinking": False}  # provider options still apply
+    assert check["messages"][1]["content"][1] == body["messages"][1]["content"][1]  # the same photo
