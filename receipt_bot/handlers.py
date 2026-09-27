@@ -27,7 +27,8 @@ from aiogram.utils.formatting import Code, Text
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from receipt_bot.google_api import (
-    GoogleError, GoogleLogin, GoogleStore, GoogleUnsure, LoginDenied, LoginExpired, ReceiptRow,
+    GoogleError, GoogleLogin, GoogleStore, GoogleUnreachable, GoogleUnsure, LoginDenied, LoginExpired, ReceiptRow,
+    ServiceDown,
 )
 from receipt_bot.recognition import (
     RATE_LIMIT_WAIT_MAX, NotAnImage, RateLimited, Recognition, RecognitionError, RecognizerChain, clean_text,
@@ -498,7 +499,16 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, recognizer: Re
 
 
 class NotSaved(Exception):
-    """Receipt not saved; the text is for the person."""
+    """Receipt not saved; the text is for the person. unsure: Google may still have it, so no "press again"."""
+
+    def __init__(self, text: str, unsure: bool = False) -> None:
+        super().__init__(text)
+        self.unsure = unsure
+
+
+def not_saved_text(e: NotSaved) -> str:
+    # "Not saved, press again" would contradict "not sure, check the sheet first" (live test 28.09)
+    return f"⚠️ {e}" if e.unsure else f"⚠️ {e} Чек не записано — можна натиснути ще раз."
 
 
 async def reply(bot: Bot, item: Pending, text: str) -> None:
@@ -517,7 +527,7 @@ async def finalize(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: b
     except NotSaved as e:
         item.status = "pending"
         await edit_receipt(bot, item, *result_view(rid, item.recognition, item.note))
-        await reply(bot, item, f"⚠️ {e} Чек не записано — можна натиснути ще раз.")
+        await reply(bot, item, not_saved_text(e))
         return
     item.status = "done"
     await edit_receipt(bot, item, f"✅ Записано: {shown}")
@@ -533,6 +543,7 @@ async def save(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: bool,
     try:
         if not await google.has_access(email):
             raise NotSaved(f"Акаунт {email} більше не має доступу до таблиці.")
+        await google.ping()  # Drive and Sheets answer, or we stop before uploading and before the daily limit
         if not saves.take(email, item.size or MAX_FILE_BYTES):  # unknown size: count the worst case
             raise NotSaved(f"Денний ліміт записів для {email} вичерпано "
                            f"({SAVES_PER_DAY} чеків або {SAVE_BYTES_PER_DAY // 2**20} МБ фото).")
@@ -549,10 +560,16 @@ async def save(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: bool,
         raise
     except NotAnImage as e:
         raise NotSaved("Файл не відкривається як фото — не записую.") from e
+    except ServiceDown as e:
+        log.warning("receipt %s: not started: %s", rid, e)
+        raise NotSaved(f"Не вдається з'єднатися з {'Google Drive' if e.service == 'Drive' else 'Google Таблицями'}.") from e
+    except GoogleUnreachable as e:
+        log.warning("receipt %s: google unreachable: %s", rid, e)
+        raise NotSaved("Не вдається з'єднатися з Google (Drive або таблиця).") from e
     except GoogleUnsure as e:
         log.warning("receipt %s: outcome unknown: %s", rid, e)
         raise NotSaved(f"Google не відповів вчасно — не впевнений, чи чек записався. "
-                       f"Перевір таблицю (ID {rid}), перш ніж натискати ще раз.") from e
+                       f"Перевір таблицю (ID {rid}), перш ніж натискати ще раз.", unsure=True) from e
     except GoogleError as e:
         log.warning("saving receipt failed: %s", e)
         raise NotSaved("Не вдалося записати в Google (Drive або таблиця).") from e

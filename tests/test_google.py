@@ -344,6 +344,107 @@ def test_timeout_and_unknown_keeps_photo(files):
     assert not any(m == "DELETE" for m, _ in log)  # we don't know whether the row exists, so the photo stays
 
 
+# --- Google unreachable (live test 28.09: Sheets blocked on the VM) ---
+
+def test_connect_errors_mean_the_request_never_left():
+    async def scenario(exc):
+        def handler(request):
+            raise exc
+
+        http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        with pytest.raises(g.GoogleUnsure) as err:
+            await g._call(http, "x", "GET", "https://sheets.googleapis.com/v4/x")
+        return err.value
+
+    assert isinstance(asyncio.run(scenario(httpx.ConnectError("no such host"))), g.GoogleUnreachable)
+    assert isinstance(asyncio.run(scenario(httpx.ConnectTimeout("slow connect"))), g.GoogleUnreachable)
+    assert not isinstance(asyncio.run(scenario(httpx.ReadTimeout("sent, no answer"))), g.GoogleUnreachable)
+
+
+def test_unreachable_sheets_removes_the_photo(files):
+    log = []
+
+    def handler(request):
+        if request.url.path.endswith("/values/A1:I1") or request.url.path.endswith(":append"):
+            raise httpx.ConnectError("sheets.googleapis.com: no such host")
+        return unsure_append(log)(request)
+
+    async def scenario():
+        with pytest.raises(g.GoogleUnreachable):
+            await store(files, handler).save_receipt(b"JPEGDATA", "image/jpeg", "r.jpg", ROW)
+
+    asyncio.run(scenario())
+    assert ("DELETE", "/drive/v3/files/F1") in log  # the row request never left: nothing to wait for
+
+
+def test_unreachable_drive_uploads_nothing(files):
+    log = []
+
+    def handler(request):
+        log.append((request.method, request.url.path))
+        if request.url.path == "/token":
+            return httpx.Response(200, json={"access_token": "owner", "expires_in": 3600})
+        raise httpx.ConnectError("www.googleapis.com: no such host")
+
+    async def scenario():
+        with pytest.raises(g.GoogleUnreachable):
+            await store(files, handler).save_receipt(b"JPEGDATA", "image/jpeg", "r.jpg", ROW)
+
+    asyncio.run(scenario())
+    assert not any("append" in p or m == "DELETE" for m, p in log)
+
+
+def ping_handler(log, drive=None, sheets=None):
+    """drive / sheets: an exception to raise or a status to answer with (None: all good)."""
+    def handler(request):
+        path = request.url.path
+        log.append(path)
+        if path == "/token":
+            return httpx.Response(200, json={"access_token": "owner", "expires_in": 3600})
+        fault = drive if path == "/drive/v3/files/FOLDER" else sheets if path == "/v4/spreadsheets/SHEET" else "?"
+        if fault == "?":
+            raise AssertionError(path)
+        if isinstance(fault, Exception):
+            raise fault
+        return httpx.Response(fault or 200, json={} if not fault else {"error": {"status": "FAILED"}})
+    return handler
+
+
+def test_ping_checks_drive_as_owner_and_sheets(files):
+    log = []
+    asyncio.run(store(files, ping_handler(log)).ping())
+    assert log == ["/token", "/drive/v3/files/FOLDER", "/v4/spreadsheets/SHEET"]
+
+
+@pytest.mark.parametrize("drive, sheets, service", [
+    (httpx.ConnectError("no such host"), None, "Drive"),
+    (503, None, "Drive"),
+    (None, httpx.ConnectError("no such host"), "Sheets"),
+    (None, 504, "Sheets"),
+])
+def test_ping_names_the_service_that_is_down(files, drive, sheets, service):
+    log = []
+
+    async def scenario():
+        with pytest.raises(g.ServiceDown) as err:
+            await store(files, ping_handler(log, drive, sheets)).ping()
+        return err.value
+
+    assert asyncio.run(scenario()).service == service
+    if service == "Drive":
+        assert "/v4/spreadsheets/SHEET" not in log  # stops at the first one that's down
+
+
+def test_ping_passes_a_setup_problem_up_as_it_is(files):
+    # 403 from Drive: the owner revoked access. That's not "can't connect", so no ServiceDown.
+    async def scenario():
+        with pytest.raises(GoogleError) as err:
+            await store(files, ping_handler([], drive=403)).ping()
+        return err.value
+
+    assert not isinstance(asyncio.run(scenario()), g.ServiceDown)
+
+
 def test_non_json_reply_still_cleans_up(files):
     log = []
 

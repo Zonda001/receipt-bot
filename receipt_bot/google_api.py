@@ -37,6 +37,18 @@ class GoogleUnsure(GoogleError):
     """Timeout / network / 5xx: Google may have done it anyway."""
 
 
+class GoogleUnreachable(GoogleUnsure):
+    """Couldn't even connect (DNS, refused, TLS): nothing reached Google. Still "unsure" for code that just retries."""
+
+
+class ServiceDown(GoogleError):
+    """Drive or Sheets didn't answer the check before saving, so nothing was started."""
+
+    def __init__(self, service: str, cause: GoogleError) -> None:
+        super().__init__(f"{service} check: {cause}")
+        self.service = service  # "Drive" or "Sheets"
+
+
 class LoginDenied(Exception):
     pass
 
@@ -79,6 +91,8 @@ def _client(client_file: str) -> tuple[str, str]:
 async def _call(http: httpx.AsyncClient, what: str, method: str, url: str, **kwargs) -> httpx.Response:
     try:
         response = await http.request(method, url, **kwargs)
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as e:
+        raise GoogleUnreachable(f"{what}: {type(e).__name__}") from e  # the request never left
     except httpx.RequestError as e:
         raise GoogleUnsure(f"{what}: {type(e).__name__}") from e
     if response.status_code >= 400:
@@ -232,16 +246,34 @@ class GoogleStore:
 
     # --- saving ---
 
+    async def ping(self) -> None:
+        """Before saving: Drive (as the folder owner) and Sheets both answer, or we don't upload anything."""
+        try:
+            await _call(self._http, "drive check", "GET", f"{DRIVE_URL}/files/{self._folder_id}",
+                        params={"fields": "id"}, headers=await self._owner_headers())
+        except GoogleUnsure as e:  # unreachable, timeout or 5xx; a 4xx is a setup problem and goes up as is
+            raise ServiceDown("Drive", e) from e
+        try:
+            await _call(self._http, "sheets check", "GET", f"{SHEETS_URL}/{self._sheet_id}",
+                        params={"fields": "spreadsheetId"}, headers=await self._sa_headers())
+        except GoogleUnsure as e:
+            raise ServiceDown("Sheets", e) from e
+
     async def save_receipt(self, photo: bytes, mime: str, file_name: str, row: ReceiptRow) -> str:
         """Photo to Drive, then the row to Sheets; returns the photo link. Never leaves a row without its photo:
         if the append failed for sure, the photo is deleted; if the outcome is unknown, the photo stays."""
         try:
             file_id, link = await self._upload(photo, mime, file_name)
+        except GoogleUnreachable:
+            raise  # nothing was uploaded
         except GoogleUnsure:
             log.error("upload outcome unknown, check Drive for %r", file_name)
             raise
         try:
             await self._append(row.cells(link))
+        except GoogleUnreachable:
+            await self._delete(file_id)  # the row request never left: a clear "not saved"
+            raise
         except GoogleUnsure:
             try:
                 if await self._row_written(row.receipt_id):
