@@ -429,7 +429,7 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, recognizer: Re
             await message.answer("Формат HEIC не підтримується. Надішли чек як фото, а не файлом.")
             return
         if mime not in IMAGE_MIME_TYPES:
-            await message.answer("Надішли фото чека (JPG або PNG), а не інший файл.")
+            await message.answer("Надішли фото чека (JPG, PNG або WEBP), а не інший файл.")
             return
     file = message.photo[-1] if message.photo else message.document
     if file.file_size and file.file_size > MAX_FILE_BYTES:
@@ -468,9 +468,9 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, recognizer: Re
             note = "Ліміт автоматичного розпізнавання на сьогодні вичерпано — суму можна ввести вручну."
     except NotAnImage:
         quota.give_back(email)  # the request never reached the model
+        hint = " Надішли чек як звичайне фото, не файлом." if message.document else " Сфотографуй чек ще раз."
         await status.edit_text(
-            "Не вдалося відкрити зображення (пошкоджене, завелике або формат не підтримується). "
-            "Надішли чек як звичайне фото, не файлом.")
+            "Не вдалося відкрити зображення (пошкоджене, завелике або формат не підтримується)." + hint)
         return
     except RateLimited as e:
         if not e.spent:
@@ -541,7 +541,11 @@ async def save(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: bool,
     if email is None:
         raise NotSaved("Ти вийшов з Google-акаунта (/login).")
     try:
-        if not await google.has_access(email):
+        try:
+            allowed = await google.has_access(email)
+        except GoogleUnsure as e:  # nothing started yet, so it's "not saved", not "not sure"
+            raise ServiceDown("Drive", e) from e
+        if not allowed:
             raise NotSaved(f"Акаунт {email} більше не має доступу до таблиці.")
         await google.ping()  # Drive and Sheets answer, or we stop before uploading and before the daily limit
         if not saves.take(email, item.size or MAX_FILE_BYTES):  # unknown size: count the worst case

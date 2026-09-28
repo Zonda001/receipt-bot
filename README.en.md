@@ -181,7 +181,7 @@ is unlinked and gets a warning.
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                                          # 227 tests, no network: Google and the providers are fakes
+pytest                                          # 231 tests, no network: Google and the providers are fakes
 ```
 
 | File | What it checks |
@@ -302,7 +302,7 @@ fallback (~80 a day). Only a person catches a wrong digit, so the bot never save
   removes it.
 - **The shared `/login` cap** (20 a minute for everyone). A few accounts can keep it busy, and then sign-in is
   unavailable for a minute to your own people too. Those already signed in aren't affected.
-- **CSV export.** In the sheet everything is stored as text (RAW), but Excel will treat a name starting with `=` as a
+- **CSV export.** In the sheet text fields are stored as text (RAW), but Excel will treat a name starting with `=` as a
   formula when opening a CSV. Open CSV exports as text.
 - **Dependencies** are given as version ranges, without a lock file: `pip install` on a new server may pick newer
   versions. The tested versions are the ones on the VM (`pip freeze`).

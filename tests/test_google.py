@@ -453,26 +453,56 @@ def test_upload_lookup_escapes_the_name(files):
     assert "name = 'it\\'s.jpg'" in next(q for _, p, q in log if p == "/drive/v3/files")
 
 
-def ping_handler(log, drive=None, sheets=None):
-    """drive / sheets: an exception to raise or a status to answer with (None: all good)."""
+HEADER_PATH = "/v4/spreadsheets/SHEET/values/A1:I1"
+
+
+def ping_handler(log, drive=None, sheets=None, header=None):
+    """drive / sheets / header: an exception to raise or a status to answer with (None: all good)."""
+    faults = {"/drive/v3/files/FOLDER": drive, "/v4/spreadsheets/SHEET": sheets, HEADER_PATH: header}
+
     def handler(request):
         path = request.url.path
         log.append(path)
         if path == "/token":
             return httpx.Response(200, json={"access_token": "owner", "expires_in": 3600})
-        fault = drive if path == "/drive/v3/files/FOLDER" else sheets if path == "/v4/spreadsheets/SHEET" else "?"
-        if fault == "?":
+        if path not in faults:
             raise AssertionError(path)
+        fault = faults[path]
         if isinstance(fault, Exception):
             raise fault
-        return httpx.Response(fault or 200, json={} if not fault else {"error": {"status": "FAILED"}})
+        if fault:
+            return httpx.Response(fault, json={"error": {"status": "FAILED"}})
+        return httpx.Response(200, json={"values": [["Додано"]]} if path == HEADER_PATH else {})
     return handler
 
 
 def test_ping_checks_drive_as_owner_and_sheets(files):
     log = []
     asyncio.run(store(files, ping_handler(log)).ping())
-    assert log == ["/token", "/drive/v3/files/FOLDER", "/v4/spreadsheets/SHEET"]
+    assert log == ["/token", "/drive/v3/files/FOLDER", "/v4/spreadsheets/SHEET", HEADER_PATH]
+
+
+def test_ping_reads_the_header_once(files):
+    log = []
+
+    async def scenario():
+        s = store(files, ping_handler(log))
+        await s.ping()
+        await s.ping()
+
+    asyncio.run(scenario())
+    assert log.count(HEADER_PATH) == 1
+
+
+@pytest.mark.parametrize("fault", [httpx.ReadTimeout("slow"), 503])
+def test_header_timeout_stops_before_the_photo(files, fault):
+    # review 28.09: the header was read after the upload, so a timeout there left a photo and "not sure"
+    async def scenario():
+        with pytest.raises(g.ServiceDown) as err:
+            await store(files, ping_handler([], header=fault)).ping()
+        return err.value
+
+    assert asyncio.run(scenario()).service == "Sheets"
 
 
 @pytest.mark.parametrize("drive, sheets, service", [

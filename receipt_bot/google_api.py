@@ -256,6 +256,7 @@ class GoogleStore:
         try:
             await _call(self._http, "sheets check", "GET", f"{SHEETS_URL}/{self._sheet_id}",
                         params={"fields": "spreadsheetId"}, headers=await self._sa_headers())
+            await self._ensure_header()  # here, before the photo: a timeout on it used to read as "not sure"
         except GoogleUnsure as e:
             raise ServiceDown("Sheets", e) from e
 
@@ -329,15 +330,20 @@ class GoogleStore:
         d = _json(r, "drive upload")
         return d["id"], d.get("webViewLink") or f"https://drive.google.com/file/d/{d['id']}/view"
 
-    async def _append(self, cells: list) -> None:
+    async def _ensure_header(self) -> None:
+        if self._header_ok:
+            return
         headers = await self._sa_headers()
-        if not self._header_ok:
-            r = await _call(self._http, "sheet header", "GET", f"{SHEETS_URL}/{self._sheet_id}/values/{HEADER_RANGE}",
-                            headers=headers)
-            if not _json(r, "sheet header").get("values"):
-                await _call(self._http, "sheet header", "PUT", f"{SHEETS_URL}/{self._sheet_id}/values/{HEADER_RANGE}",
-                            params={"valueInputOption": "RAW"}, json={"values": [HEADER]}, headers=headers)
-            self._header_ok = True
+        r = await _call(self._http, "sheet header", "GET", f"{SHEETS_URL}/{self._sheet_id}/values/{HEADER_RANGE}",
+                        headers=headers)
+        if not _json(r, "sheet header").get("values"):
+            await _call(self._http, "sheet header", "PUT", f"{SHEETS_URL}/{self._sheet_id}/values/{HEADER_RANGE}",
+                        params={"valueInputOption": "RAW"}, json={"values": [HEADER]}, headers=headers)
+        self._header_ok = True
+
+    async def _append(self, cells: list) -> None:
+        await self._ensure_header()  # the bot already did it in ping(); a no-op then
+        headers = await self._sa_headers()
         # RAW, not USER_ENTERED: a Telegram name like "=IMPORTXML(...)" must stay text, not become a formula.
         await _call(self._http, "sheet append", "POST", f"{SHEETS_URL}/{self._sheet_id}/values/A1:append",
                     params={"valueInputOption": "RAW", "insertDataOption": "INSERT_ROWS"},

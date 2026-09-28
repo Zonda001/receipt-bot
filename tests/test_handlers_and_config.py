@@ -254,6 +254,36 @@ def test_save_stops_before_the_upload_when_google_is_down():
     assert saves.take("a@x", 1)  # the day's only save wasn't spent on a try that couldn't work
 
 
+def test_access_check_timeout_is_not_saved_not_unsure():
+    # review 28.09: a timeout on the access check said "not sure it saved, check the sheet" before anything started
+    import asyncio
+    from decimal import Decimal
+
+    from receipt_bot.google_api import GoogleUnsure
+    from receipt_bot.handlers import NotSaved, Pending, SaveLimit, not_saved_text, save
+    from receipt_bot.recognition import Recognition
+
+    calls = []
+
+    class Google:
+        async def has_access(self, email):
+            raise GoogleUnsure("permissions.list: ReadTimeout")
+
+        async def ping(self):
+            calls.append("ping")
+
+    class Users:
+        def email(self, user_id):
+            return "a@x"
+
+    item = Pending(user_id=1, file_id="f", recognition=Recognition(is_receipt=True), created=0.0, chat_id=1, msg_id=1)
+    with pytest.raises(NotSaved) as err:
+        asyncio.run(save(None, "rid", item, Decimal("1.00"), False, Users(), Google(), SaveLimit(1, 10**9)))
+    assert not err.value.unsure and calls == []
+    assert not_saved_text(err.value) == (
+        "⚠️ Не вдається з'єднатися з Google Drive. Чек не записано — можна натиснути ще раз.")
+
+
 def test_unsure_save_does_not_also_say_not_saved():
     # live 28.09: "not sure it saved, check the sheet" + "not saved, press again" in one message
     from receipt_bot.handlers import NotSaved, not_saved_text
