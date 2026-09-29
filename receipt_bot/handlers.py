@@ -245,6 +245,8 @@ async def access_problem(user_id: int, users: Users, google: GoogleStore) -> str
     email = users.email(user_id)
     if email is None:
         return LOGIN_FIRST
+    if users.via_domain(user_id):
+        return None
     try:
         if await google.has_access(email):
             return None
@@ -360,7 +362,7 @@ async def finish_login(message: Message, code, users: Users, google: GoogleStore
                        logins: dict[int, asyncio.Task]) -> None:
     user_id = message.from_user.id
     try:
-        email = await login.wait_for_email(code)
+        email, workspace = await login.wait_for_identity(code)
     except LoginDenied:
         return await say(message, "Вхід скасовано.")
     except LoginExpired:
@@ -371,8 +373,10 @@ async def finish_login(message: Message, code, users: Users, google: GoogleStore
     finally:
         if logins.get(user_id) is asyncio.current_task():
             logins.pop(user_id, None)
+    # The company's own accounts need no share of the sheet; everyone else still does.
+    via_domain = bool(users.domain) and workspace == users.domain and email.endswith("@" + users.domain)
     try:
-        allowed = await google.has_access(email)
+        allowed = via_domain or await google.has_access(email)
     except GoogleError as e:
         log.warning("access check failed: %s", e)
         return await say(message, "Не вдалося перевірити доступ до таблиці. Спробуй /login ще раз за хвилину.")
@@ -380,7 +384,7 @@ async def finish_login(message: Message, code, users: Users, google: GoogleStore
         log.info("user %s signed in without sheet access", user_id)  # no email, just a trace for complaints
         return await say(message, f"Акаунт {email} не має доступу на редагування таблиці. "
                                   "Попроси власника відкрити доступ і тоді /login ще раз.")
-    for other in users.link(user_id, email):
+    for other in users.link(user_id, email, via_domain=via_domain):
         # One email, one Telegram. If someone slipped in a login code, the real owner finds out.
         with suppress(TelegramAPIError):
             await message.bot.send_message(other, f"⚠️ Акаунт {email} щойно підключили до іншого Telegram, "
@@ -542,7 +546,7 @@ async def save(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: bool,
         raise NotSaved("Ти вийшов з Google-акаунта (/login).")
     try:
         try:
-            allowed = await google.has_access(email)
+            allowed = users.via_domain(item.user_id) or await google.has_access(email)
         except GoogleUnsure as e:  # nothing started yet, so it's "not saved", not "not sure"
             raise ServiceDown("Drive", e) from e
         if not allowed:

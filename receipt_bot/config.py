@@ -37,3 +37,6 @@ class Settings(BaseSettings):
     daily_recognitions_per_person: int = 100  # per Google account, so one person can't use up the team's cap
 
     db_path: str = "data/bot.db"  # which Telegram user signed in with which Google account
+
+    # Accounts of this Google Workspace domain get in without a share of the sheet; empty turns it off.
+    allowed_domain: str = ""

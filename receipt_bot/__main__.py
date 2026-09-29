@@ -86,7 +86,7 @@ async def main() -> None:
     recognizer = RecognizerChain(primary, fallback)
 
     google_http = httpx.AsyncClient(timeout=30)
-    users = Users(settings.db_path)
+    users = Users(settings.db_path, settings.allowed_domain)
     bot = Bot(bot_token)
     dp = Dispatcher(
         recognizer=recognizer,

@@ -129,7 +129,11 @@ class GoogleLogin:
                           int(d.get("expires_in", 1800)), int(d.get("interval", 5)))
 
     async def wait_for_email(self, code: DeviceCode) -> str:
-        return await self.email((await self.wait_for_tokens(code))["access_token"])
+        return (await self.wait_for_identity(code))[0]
+
+    async def wait_for_identity(self, code: DeviceCode) -> tuple[str, str]:
+        """The verified address and the Google Workspace domain that manages the account ("" for a personal one)."""
+        return await self.identity((await self.wait_for_tokens(code))["access_token"])
 
     async def wait_for_tokens(self, code: DeviceCode) -> dict:
         deadline = time.monotonic() + code.expires_in
@@ -166,12 +170,16 @@ class GoogleLogin:
         raise LoginExpired()
 
     async def email(self, access_token: str) -> str:
+        return (await self.identity(access_token))[0]
+
+    async def identity(self, access_token: str) -> tuple[str, str]:
+        # "hd" comes only from Workspace: a personal account registered on a company address has none.
         r = await _call(self._http, "userinfo", "GET", USERINFO_URL,
                         headers={"Authorization": f"Bearer {access_token}"})
         info = _json(r, "userinfo")
         if not info.get("email") or not info.get("email_verified"):
             raise GoogleError("userinfo: no verified email")
-        return info["email"].lower()
+        return info["email"].lower(), str(info.get("hd") or "").lower()
 
 
 class GoogleStore:
@@ -218,7 +226,8 @@ class GoogleStore:
 
     async def has_access(self, email: str) -> bool:
         """Edit access shared with this very person. Not "anyone with the link" (the bot is public) and not
-        a whole domain (a personal account can use a company address). Groups aren't expanded (see README)."""
+        a domain share (a personal account can use a company address; the company domain is let in at sign-in,
+        by Google's own "hd" mark instead). Groups aren't expanded (see README)."""
         if time.monotonic() - self._permissions_at > PERMISSIONS_TTL:
             # One refresh at a time: an album used to fire ten, and a late old answer restarted the minute.
             async with self._permissions_lock:

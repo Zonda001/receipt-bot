@@ -723,3 +723,51 @@ def test_owner_login_does_not_blame_the_folder_for_a_google_outage(files, tmp_pa
     with pytest.raises(g.GoogleUnsure) as e:
         run_owner(files, tmp_path, owner_handler(folder="down"), folder_id="FOLDER")
     assert "clear DRIVE_FOLDER_ID" not in str(e.value)
+
+
+# --- sign-in by company domain (29.09) ---
+
+@pytest.mark.parametrize("info, hd", [
+    ({"email": "Ann@Trustee.io", "email_verified": True, "hd": "Trustee.io"}, "trustee.io"),
+    ({"email": "ann@trustee.io", "email_verified": True}, ""),  # a personal account on a company address
+])
+def test_identity_carries_the_workspace_domain(files, info, hd):
+    def handler(request):
+        if request.url.path == "/token":
+            return httpx.Response(200, json={"access_token": "at"})
+        return httpx.Response(200, json=info)
+
+    async def scenario():
+        login = GoogleLogin(files[0], httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        return await login.wait_for_identity(g.DeviceCode("dc", "X", "u", 1800, 5))
+
+    assert asyncio.run(scenario()) == ("ann@trustee.io", hd)
+
+
+def test_via_domain_needs_the_mark_and_the_same_domain(tmp_path):
+    users = Users(str(tmp_path / "bot.db"), domain="trustee.io")
+    users.link(1, "ann@trustee.io", via_domain=True)
+    users.link(2, "bob@trustee.io")  # let in by a share of the sheet, not by the domain
+    users.link(3, "eve@gmail.com", via_domain=True)  # the mark alone isn't enough
+    assert [users.via_domain(i) for i in (1, 2, 3)] == [True, False, False]
+    users.close()
+    # The domain turned off or changed: nobody keeps getting in by it.
+    for domain in ("", "other.io"):
+        again = Users(str(tmp_path / "bot.db"), domain=domain)
+        assert not again.via_domain(1) and again.email(1) == "ann@trustee.io"
+        again.close()
+
+
+def test_an_older_database_gets_the_new_column(tmp_path):
+    import sqlite3
+
+    path = str(tmp_path / "bot.db")
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE users (telegram_id INTEGER PRIMARY KEY, email TEXT NOT NULL, linked_at TEXT NOT NULL)")
+    db.execute("INSERT INTO users VALUES (1, 'bob@gmail.com', ?)",
+               (__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),))
+    db.commit()
+    db.close()
+    users = Users(path, domain="trustee.io")
+    assert users.email(1) == "bob@gmail.com" and not users.via_domain(1)
+    users.close()

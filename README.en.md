@@ -140,6 +140,7 @@ directory. For anything else, adjust `User`, `WorkingDirectory`, `ExecStart` and
 | `DAILY_RECOGNITIONS` | Daily recognition cap for the whole team (a safety net; 300) |
 | `DAILY_RECOGNITIONS_PER_PERSON` | How many of those one Google account may use a day (100) |
 | `DB_PATH` | SQLite database (`data/bot.db`) |
+| `ALLOWED_DOMAIN` | Google Workspace domain whose accounts get in without a share of the sheet (`trustee.io`); empty turns it off |
 
 ## Setting up authorization
 
@@ -171,7 +172,9 @@ Then on the server, from the bot's directory:
    restart the bot.
 
 How a person signs in: `/login` → device flow with scope `openid email` → the bot gets a verified email and drops the
-token → the service account checks edit rights to the sheet. Without rights, the email isn't stored. One email can
+token. A Google Workspace account of the `ALLOWED_DOMAIN` domain gets in at once: Google marks it with `hd`, and a
+personal account on a company address has no such mark. For everyone else the service account checks edit rights to
+the sheet. Without rights, the email isn't stored. One email can
 be linked to only one Telegram account: if the same Google account signs in from another Telegram, the previous one
 is unlinked and gets a warning.
 
@@ -181,7 +184,7 @@ is unlinked and gets a warning.
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                                          # 231 tests, no network: Google and the providers are fakes
+pytest                                          # 240 tests, no network: Google and the providers are fakes
 ```
 
 | File | What it checks |
@@ -277,9 +280,11 @@ fallback (~80 a day). Only a person catches a wrong digit, so the bot never save
   else's Telegram to their account. What limits this: one email, one Telegram (the previous account is unlinked and
   warned), every row in the sheet has the sender's Telegram ID, a Google account gets no more than 100 saves and
   200 MB of photos a day, and the bot always names the account you signed in with.
-- **Access** comes only from edit rights given to a specific person. Google groups, domain-wide access (a personal
-  account may have a corporate address) and "anyone with the link" (the bot is public) don't count. Revoking access
-  takes effect within a minute: that's how long the bot caches the sheet's permissions.
+- **Access** comes from a Google Workspace account of the `ALLOWED_DOMAIN` domain or from edit rights given to a
+  specific person. Google groups, domain-wide sharing of the sheet (a personal account may have a corporate address)
+  and "anyone with the link" (the bot is public) don't count. Revoking rights takes effect within a minute: that's how
+  long the bot caches the sheet's permissions. A domain account stays signed in until the person signs out (`/logout`)
+  or signs in with another account: the bot can't see that the Workspace account was switched off.
 - **If Google answered 5xx or didn't answer in time**, the bot looks the row up by the receipt ID. If it isn't there,
   the bot keeps the photo and asks to check the sheet before retrying. So in a rare case the folder gets a spare
   photo without a row (its ID is in the log).

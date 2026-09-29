@@ -116,8 +116,8 @@ def test_login_without_access_leaves_a_trace_but_no_email(caplog):
     async def answer(text, **kwargs):
         answers.append(text)
 
-    async def wait_for_email(code):
-        return "stranger@gmail.com"
+    async def wait_for_identity(code):
+        return "stranger@gmail.com", ""
 
     async def has_access(email):
         return False
@@ -128,8 +128,8 @@ def test_login_without_access_leaves_a_trace_but_no_email(caplog):
     message = SimpleNamespace(from_user=SimpleNamespace(id=42), answer=answer)
     code = g.DeviceCode("dc", "X", "https://www.google.com/device", 1800, 5)
     with caplog.at_level(logging.INFO, logger="receipt_bot.handlers"):
-        asyncio.run(finish_login(message, code, SimpleNamespace(link=link), SimpleNamespace(has_access=has_access),
-                                 SimpleNamespace(wait_for_email=wait_for_email), {}))
+        asyncio.run(finish_login(message, code, SimpleNamespace(link=link, domain="trustee.io"),
+                                 SimpleNamespace(has_access=has_access), SimpleNamespace(wait_for_identity=wait_for_identity), {}))
     assert "user 42 signed in without sheet access" in caplog.text
     assert "stranger" not in caplog.text
     assert "не має доступу" in answers[0]
@@ -153,7 +153,7 @@ def run_login(answer):
         logins = {}
         message = SimpleNamespace(from_user=SimpleNamespace(id=7), answer=answer)
         await on_login(message, SimpleNamespace(), SimpleNamespace(),
-                       SimpleNamespace(start=start, wait_for_email=never_finishes),
+                       SimpleNamespace(start=start, wait_for_identity=never_finishes),
                        RateLimiter(3), RateLimiter(20), logins)
         task = logins.pop(7, None)
         await asyncio.sleep(0)  # let the cancellation run
@@ -244,6 +244,9 @@ def test_save_stops_before_the_upload_when_google_is_down():
         def email(self, user_id):
             return "a@x"
 
+        def via_domain(self, user_id):
+            return False
+
     saves = SaveLimit(1, 10**9)
     item = Pending(user_id=1, file_id="f", recognition=Recognition(is_receipt=True), created=0.0, chat_id=1, msg_id=1)
     with pytest.raises(NotSaved) as err:
@@ -276,6 +279,9 @@ def test_access_check_timeout_is_not_saved_not_unsure():
         def email(self, user_id):
             return "a@x"
 
+        def via_domain(self, user_id):
+            return False
+
     item = Pending(user_id=1, file_id="f", recognition=Recognition(is_receipt=True), created=0.0, chat_id=1, msg_id=1)
     with pytest.raises(NotSaved) as err:
         asyncio.run(save(None, "rid", item, Decimal("1.00"), False, Users(), Google(), SaveLimit(1, 10**9)))
@@ -291,3 +297,91 @@ def test_unsure_save_does_not_also_say_not_saved():
     unsure = not_saved_text(NotSaved("Google не відповів вчасно — не впевнений, чи чек записався.", unsure=True))
     assert "не записано" not in unsure and unsure.startswith("⚠️ Google не відповів")
     assert not_saved_text(NotSaved("Не вдалося записати в Google.")).endswith("Чек не записано — можна натиснути ще раз.")
+
+
+# --- sign-in by company domain (29.09) ---
+
+def domain_login(identity, has_access):
+    import asyncio
+    from types import SimpleNamespace
+
+    import receipt_bot.google_api as g
+    from receipt_bot.handlers import finish_login
+
+    answers, linked, asked = [], [], []
+
+    async def answer(text, **kwargs):
+        answers.append(text)
+
+    async def wait_for_identity(code):
+        return identity
+
+    async def check(email):
+        asked.append(email)
+        return has_access
+
+    def link(user_id, email, via_domain=False):
+        linked.append((email, via_domain))
+        return []
+
+    message = SimpleNamespace(from_user=SimpleNamespace(id=42), answer=answer)
+    code = g.DeviceCode("dc", "X", "https://www.google.com/device", 1800, 5)
+    asyncio.run(finish_login(message, code, SimpleNamespace(link=link, domain="trustee.io"),
+                             SimpleNamespace(has_access=check), SimpleNamespace(wait_for_identity=wait_for_identity), {}))
+    return answers, linked, asked
+
+
+def test_a_company_account_gets_in_without_a_share_of_the_sheet():
+    answers, linked, asked = domain_login(("ann@trustee.io", "trustee.io"), has_access=False)
+    assert linked == [("ann@trustee.io", True)] and asked == []
+    assert "✅" in answers[0]
+
+
+def test_a_personal_account_on_a_company_address_still_needs_a_share():
+    answers, linked, asked = domain_login(("ann@trustee.io", ""), has_access=False)
+    assert linked == [] and asked == ["ann@trustee.io"]
+    assert "не має доступу" in answers[0]
+
+
+def test_another_workspace_does_not_pass_for_the_company():
+    _, linked, asked = domain_login(("ann@trustee.io.evil.com", "trustee.io.evil.com"), has_access=False)
+    assert linked == [] and asked == ["ann@trustee.io.evil.com"]
+
+
+def test_someone_outside_the_domain_with_a_share_still_gets_in():
+    _, linked, _ = domain_login(("bohdan@gmail.com", ""), has_access=True)
+    assert linked == [("bohdan@gmail.com", False)]
+
+
+def test_a_company_account_saves_without_asking_for_the_share():
+    import asyncio
+    from decimal import Decimal
+
+    from receipt_bot.google_api import GoogleUnreachable, ServiceDown
+    from receipt_bot.handlers import NotSaved, Pending, SaveLimit, access_problem, save
+    from receipt_bot.recognition import Recognition
+
+    asked = []
+
+    class Google:
+        async def has_access(self, email):
+            asked.append(email)
+            return False
+
+        async def ping(self):  # stop right after the access step
+            asked.append("ping")
+            raise ServiceDown("Sheets", GoogleUnreachable("sheets check: ConnectError"))
+
+    class Users:
+        def email(self, user_id):
+            return "ann@trustee.io"
+
+        def via_domain(self, user_id):
+            return True
+
+    assert asyncio.run(access_problem(1, Users(), Google())) is None
+    item = Pending(user_id=1, file_id="f", recognition=Recognition(is_receipt=True), created=0.0, chat_id=1, msg_id=1)
+    with pytest.raises(NotSaved):
+        asyncio.run(save(None, "rid", item, Decimal("1.00"), False, Users(), Google(), SaveLimit(1, 10**9)))
+    assert asked == ["ping"]  # past the access step without a share, stopped at the ping
+
