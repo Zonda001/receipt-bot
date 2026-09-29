@@ -628,8 +628,8 @@ def test_sender_name_cannot_scramble_the_id():
     from types import SimpleNamespace
     from receipt_bot.handlers import display_name
     # RLO would show "id 7" backwards in the sheet; BEL and other control characters are just noise
-    assert display_name(SimpleNamespace(id=7, first_name="Ev‮il", last_name="\x07", username=None)) == "Evil (id 7)"
-    assert display_name(SimpleNamespace(id=7, first_name="​‮", last_name=None, username=None)) == "без імені (id 7)"
+    assert display_name(SimpleNamespace(id=7, first_name="Ev\u202eil", last_name="\x07", username=None)) == "Evil (id 7)"
+    assert display_name(SimpleNamespace(id=7, first_name="\u200b\u202e", last_name=None, username=None)) == "без імені (id 7)"
 
 
 def test_non_image_is_never_uploaded():
