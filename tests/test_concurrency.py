@@ -1,12 +1,15 @@
 """Races that only show up when taps are handled concurrently (which is how aiogram works)."""
 import asyncio
 import io
+from decimal import Decimal
+from types import SimpleNamespace
 
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
 from PIL import Image
 
+from receipt_bot import handlers
 from receipt_bot.handlers import Pending, PendingStore, release_manual
 from receipt_bot.recognition import RateLimited, Recognition, Recognizer, Truncated
 
@@ -38,6 +41,31 @@ def test_fast_manual_taps_on_two_receipts_keep_the_last_one():
         bot.gate.set()
         await tap_a
         assert (await state.get_data())["rid"] == "B"
+
+    asyncio.run(scenario())
+
+
+def test_manual_amount_with_currency_overrides_the_recognized_one(monkeypatch):
+    async def scenario():
+        state = FSMContext(storage=MemoryStorage(), key=StorageKey(bot_id=1, chat_id=1, user_id=1))
+        pending = PendingStore()
+        rid = pending.add(Pending(user_id=1, file_id="f", recognition=Recognition(is_receipt=True, currency="USD"),
+                                  created=0, chat_id=1, msg_id=1))
+        pending._items[rid].created = float("inf")
+        await state.update_data(rid=rid)
+        saved = []
+
+        async def fake_finalize(bot, rid, item, amount, manual, *rest):
+            saved.append((amount, item.recognition.currency, manual))
+
+        async def no_edit(*args, **kwargs):
+            pass
+
+        monkeypatch.setattr(handlers, "finalize", fake_finalize)
+        monkeypatch.setattr(handlers, "edit_receipt", no_edit)
+        message = SimpleNamespace(text="126 AED", from_user=SimpleNamespace(id=1))
+        await handlers.on_manual_amount(message, None, state, pending, None, None, None)
+        assert saved == [(Decimal("126.00"), "AED", True)]
 
     asyncio.run(scenario())
 

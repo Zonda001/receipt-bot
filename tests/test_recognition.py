@@ -7,7 +7,7 @@ from PIL import Image
 
 import receipt_bot.recognition as recognition
 from receipt_bot.recognition import (
-    MAX_SIDE, NotAnImage, _Candidate, _ModelAnswer, is_not_total, normalize, parse_amount, prepare_image, to_amount,
+    MAX_SIDE, NotAnImage, _Candidate, _ModelAnswer, is_not_total, normalize, parse_amount, parse_manual, prepare_image, to_amount,
 )
 
 
@@ -30,6 +30,27 @@ def test_parse_amount_ok(text, expected):
 @pytest.mark.parametrize("text", ["", "abc", "0", "-5", "12.345", "1e5", "nan", "inf", "1,2,3", "100000000"])
 def test_parse_amount_rejects(text):
     assert parse_amount(text) is None
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("126", (Decimal("126.00"), None)),
+    ("126 AED", (Decimal("126.00"), "AED")),  # Vadym 30.09: this used to be refused
+    ("126aed", (Decimal("126.00"), "AED")),
+    ("AED 126", (Decimal("126.00"), "AED")),
+    ("$12.50", (Decimal("12.50"), "USD")),
+    ("12,5 €", (Decimal("12.50"), "EUR")),
+    ("1 234,50 грн.", (Decimal("1234.50"), "UAH")),
+    ("99 zł", (Decimal("99.00"), "PLN")),
+    ("40 Dhs", (Decimal("40.00"), "AED")),
+])
+def test_parse_manual_reads_currency(text, expected):
+    assert parse_manual(text) == expected
+
+
+@pytest.mark.parametrize("text", ["AED 126 USD", "126 долари", "126 A1B", "USD", "126 $ $", "- 5 USD",
+                                  "1" + " " * 4000 + "x"])
+def test_parse_manual_rejects(text):
+    assert parse_manual(text) is None
 
 
 def test_to_amount_rounds_float_noise():
@@ -62,6 +83,20 @@ def test_no_total_keeps_candidates_for_choice():
 def test_nonsense_amounts_and_currency():
     rec = normalize(answer(total=-5, candidates=[("X", 0), ("Y", 1e9)], currency="гривня"))
     assert rec.candidates == [] and rec.currency == "UAH"
+
+
+@pytest.mark.parametrize("currency, country, expected", [
+    ("USD", "AE", "AED"),  # Gemma reads the 2025 dirham sign as $ on a Dubai receipt (Vadym 30.09)
+    ("USD", "de", "EUR"),
+    ("USD", "US", "USD"),
+    ("USD", "EC", "USD"),  # Ecuador pays in dollars: not in the table, left alone
+    ("USD", None, "USD"),
+    ("GBP", "AE", "GBP"),  # only USD is suspicious
+])
+def test_usd_outside_dollar_countries_becomes_local(currency, country, expected):
+    rec = normalize(_ModelAnswer(is_receipt=True, total=126, currency=currency, date=None, country=country,
+                                 candidates=[_Candidate(label="Amount", amount=126)]))
+    assert rec.currency == expected
 
 
 def test_date_parsing():

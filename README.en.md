@@ -22,7 +22,9 @@ The bot talks to people in Ukrainian; quoted bot messages below are translations
    signed in with.
 2. Send a receipt photo: one or an album, as a photo or as a file (JPEG, PNG, WEBP, up to 10 MB).
 3. The bot shows the amount it found. You can confirm it, pick another amount from the receipt, take the amount with
-   the bank fee, type it manually or cancel.
+   the bank fee, type it manually or cancel. A typed amount can carry a currency (`126 AED`, `$12.50`): it replaces
+   the recognized one. If the model says USD for a shop in a country with its own currency, the bot takes that
+   country's currency: Gemma reads the new UAE dirham sign as `$`.
 4. After confirmation the photo goes to Drive, the row goes to the sheet, and the bot replies "Saved".
 
 Sheet columns: **Added · Receipt date · Sender** (name, @username and Telegram ID) **· Email · Amount · Currency ·
@@ -184,7 +186,7 @@ is unlinked and gets a warning.
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                                          # 240 tests, no network: Google and the providers are fakes
+pytest                                          # 263 tests, no network: Google and the providers are fakes
 ```
 
 | File | What it checks |

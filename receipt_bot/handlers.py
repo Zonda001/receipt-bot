@@ -32,7 +32,7 @@ from receipt_bot.google_api import (
 )
 from receipt_bot.recognition import (
     RATE_LIMIT_WAIT_MAX, NotAnImage, RateLimited, Recognition, RecognitionError, RecognizerChain, clean_text,
-    parse_amount, validate_image,
+    parse_manual, validate_image,
 )
 from receipt_bot.storage import Users
 
@@ -236,8 +236,8 @@ def manual_view(rid: str, rec: Recognition) -> tuple[str, InlineKeyboardMarkup]:
     kb.button(text="↩️ Назад", callback_data=ReceiptAction(rid=rid, action="back"))
     kb.button(text="✖️ Скасувати", callback_data=ReceiptAction(rid=rid, action="cancel"))
     kb.adjust(2)
-    return (f"Введи суму для цього чека числом ({currency_name(rec.currency)}), наприклад 123.45",
-            kb.as_markup())
+    return (f"Введи суму для цього чека числом ({currency_name(rec.currency)}), наприклад 123.45\n"
+            f"Якщо валюта інша, допиши її код: 126 AED", kb.as_markup())
 
 
 async def access_problem(user_id: int, users: Users, google: GoogleStore) -> str | None:
@@ -661,10 +661,13 @@ async def on_manual_amount(message: Message, bot: Bot, state: FSMContext, pendin
         await state.clear()
         await message.answer("Цей чек уже оброблено.")
         return
-    amount = parse_amount(message.text)
-    if amount is None:
-        await message.answer("Не схоже на суму. Введи число, наприклад 123.45")
+    parsed = parse_manual(message.text)
+    if parsed is None:
+        await message.answer("Не схоже на суму. Введи число, наприклад 123.45, або з валютою: 126 AED")
         return
+    amount, currency = parsed
+    if currency:  # the model may misread the currency (AED -> USD, Vadym 30.09)
+        item.recognition = replace(item.recognition, currency=currency)
     item.status = "processing"
     await state.clear()
     log.info("receipt %s: manual amount", rid)
@@ -676,7 +679,7 @@ async def on_manual_amount(message: Message, bot: Bot, state: FSMContext, pendin
 async def on_other(message: Message, chatter: RateLimiter) -> None:
     if not chatter.allow(message.from_user.id):
         return  # don't answer spam: Telegram has a global send limit
-    if message.text and parse_amount(message.text) is not None:
+    if message.text and parse_manual(message.text) is not None:
         await message.answer("Щоб записати суму, натисни «✏️ Ввести вручну» під потрібним чеком. "
                              "Якщо кнопок уже нема — надішли фото чека ще раз.")
         return
