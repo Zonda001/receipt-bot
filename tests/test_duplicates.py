@@ -312,3 +312,35 @@ def test_save_writes_the_mismatch_into_the_sheet():
     item = Pending(user_id=1, file_id="f", recognition=printed, created=0.0, chat_id=1, msg_id=1)
     asyncio.run(save(Bot(), "rid", item, Decimal("792.00"), True, Users(), Google(), SaveLimit(5, 10**9)))
     assert rows[0].level == "вручну: на чеку 772.00 грн" and rows[0].score is None
+
+
+def test_the_flag_keeps_the_currency_read_from_the_photo(monkeypatch):
+    # live 01.10: "50 EUR" typed on a 79.16 грн receipt was flagged as "на чеку 79.16 EUR"
+    from aiogram.fsm.context import FSMContext
+    from aiogram.fsm.storage.base import StorageKey
+    from aiogram.fsm.storage.memory import MemoryStorage
+
+    seen = []
+
+    async def fake_confirm(bot, rid, item, amount, manual, *rest):
+        seen.append(confidence(item.recognition, 0, manual, amount))
+
+    async def no_edit(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(handlers, "confirm", fake_confirm)
+    monkeypatch.setattr(handlers, "edit_receipt", no_edit)
+
+    async def scenario():
+        state = FSMContext(storage=MemoryStorage(), key=StorageKey(bot_id=1, chat_id=1, user_id=1))
+        pending = PendingStore()
+        meat = replace(AED, currency="UAH", candidates=[Candidate("СУМА", Decimal("79.16"))])
+        rid = pending.add(Pending(user_id=1, file_id="f", recognition=meat, created=float("inf"), chat_id=1, msg_id=1))
+        await state.update_data(rid=rid)
+        message = SimpleNamespace(text="50 EUR", from_user=SimpleNamespace(id=1))
+        await handlers.on_manual_amount(message, None, state, pending, None, None, None)
+        return pending.get(rid).recognition
+
+    rec = asyncio.run(scenario())
+    assert rec.currency == "EUR" and rec.read_currency == "UAH"
+    assert seen == [(None, "вручну: на чеку 79.16 грн")]

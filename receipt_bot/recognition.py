@@ -206,6 +206,7 @@ class Recognition:
     source: str = "other"     # paper | app | editor | handwritten | other: a typed-up "receipt" shows the editor
     hand_edited: bool = False  # a printed amount crossed out and rewritten by hand
     not_receipt: bool = False  # the model said "not a receipt"; manual entry stays, but the sheet should know
+    read_currency: str = ""    # what the photo said before a typed "50 EUR" replaced it; "" if nothing was typed
 
     @property
     def total(self) -> Decimal | None:

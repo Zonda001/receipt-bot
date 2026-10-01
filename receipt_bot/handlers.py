@@ -257,7 +257,8 @@ def confidence(rec: Recognition, pick: int, manual: bool,
     if manual:
         # The model can't see a pen on 2 of 3 corrected receipts, but it reads the printed 772: a typed 792 differs.
         if typed is not None and rec.candidates and typed not in {c.amount for c in rec.candidates}:
-            flags.append(f"на чеку {fmt(rec.candidates[0].amount, rec.currency)}")
+            # the currency read from the photo: a typed "50 EUR" on a 79.16 грн receipt isn't "79.16 EUR" (live 01.10)
+            flags.append(f"на чеку {fmt(rec.candidates[0].amount, rec.read_currency or rec.currency)}")
         return None, "вручну" + (f": {', '.join(flags)}" if flags else "")
     score, why = 100 - 50 * len(flags), flags
     if not rec.has_total:
@@ -808,7 +809,8 @@ async def on_manual_amount(message: Message, bot: Bot, state: FSMContext, pendin
         return
     amount, currency = parsed
     if currency:  # the model may misread the currency (AED -> USD)
-        item.recognition = replace(item.recognition, currency=currency)
+        rec = item.recognition
+        item.recognition = replace(rec, currency=currency, read_currency=rec.read_currency or rec.currency)
     item.status = "processing"
     await state.clear()
     log.info("receipt %s: manual amount", rid)
