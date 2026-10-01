@@ -394,3 +394,25 @@ def test_saved_over_a_warning_is_marked_in_the_sheet_and_the_chat():
     asyncio.run(finalize(Bot(), "rid", item, Decimal("126.00"), False, Users(), Google(), SaveLimit(5, 10**9)))
     assert rows[0].level == "висока: дубль old1"
     assert all("попри попередження про дубль (ID old1)" in text for text in said)
+
+
+def test_back_from_a_warning_forgets_the_duplicate(monkeypatch):
+    # warning -> "Назад" -> another amount that isn't a duplicate: the row must not say "дубль"
+    from aiogram.fsm.context import FSMContext
+    from aiogram.fsm.storage.base import StorageKey
+    from aiogram.fsm.storage.memory import MemoryStorage
+
+    async def no_edit(*args, **kwargs):
+        pass
+
+    async def answer(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(handlers, "edit_receipt", no_edit)
+    pending = PendingStore()
+    rid = pending.add(Pending(user_id=1, file_id="f", recognition=AED, created=float("inf"), chat_id=1, msg_id=1,
+                              chosen=(Decimal("126.00"), False), dup="old1"))
+    state = FSMContext(storage=MemoryStorage(), key=StorageKey(bot_id=1, chat_id=1, user_id=1))
+    query = SimpleNamespace(from_user=SimpleNamespace(id=1), answer=answer)
+    asyncio.run(handlers.on_action(query, ReceiptAction(rid=rid, action="back"), None, state, pending, None, None, None))
+    assert pending.get(rid).chosen is None and pending.get(rid).dup == ""
