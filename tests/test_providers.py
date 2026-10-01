@@ -73,8 +73,11 @@ def test_polish_and_english_totals_are_kept(label):
 
 def test_schema_asks_for_amounts_before_the_verdict():
     # Field order isn't cosmetic: with is_receipt first the model said "not a receipt" on 19 of 24 real documents.
-    assert RESPONSE_SCHEMA["required"][0] == "candidates" and RESPONSE_SCHEMA["required"][-1] == "is_receipt"
+    order = RESPONSE_SCHEMA["required"]
+    assert order.index("candidates") < order.index("total") and order[-1] == "is_receipt"
     assert list(RESPONSE_SCHEMA["properties"])[-1] == "is_receipt"
+    # and the same trick the other way: the pen is described before the yes/no about it (01.10)
+    assert order[:2] == ["pen_marks", "hand_edited"] and list(RESPONSE_SCHEMA["properties"])[:2] == order[:2]
 
 
 # --- limit messages ---
