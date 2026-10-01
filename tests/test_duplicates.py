@@ -69,6 +69,16 @@ def test_a_typed_up_document_scores_low():
     dressed = replace(AED, source="editor")
     assert confidence(dressed, 0, False) == (50, "низька: набрано в редакторі")
     assert confidence(replace(AED, source="app"), 0, False) == (100, "висока")  # a Monobank screenshot is fine
+
+
+def test_red_flags_show_on_a_typed_amount_too():
+    # 30.09: a candy box typed in as 637363, a real 772 receipt with "792" written over it in pen
+    from receipt_bot.handlers import not_a_receipt
+    assert confidence(not_a_receipt(AED), 0, True) == (None, "вручну: не схоже на чек")
+    assert confidence(replace(AED, hand_edited=True), 0, True) == (None, "вручну: суму виправлено від руки")
+    assert confidence(replace(AED, hand_edited=True), 0, False) == (50, "низька: суму виправлено від руки")
+    sticker = replace(AED, source="handwritten", merchant="", receipt_number="")
+    assert confidence(sticker, 0, False) == (0, "низька: написано від руки, нема продавця, нема номера чека")
     nothing = Recognition(is_receipt=True, currency_source="unknown")
     assert confidence(nothing, 0, False)[0] == 0  # never below zero
 
@@ -96,6 +106,9 @@ def test_merchant_and_number_are_cleaned():
     assert norm('ТОВ "Аргон"\u202e', "ЧЕК N 5940030") == ('ТОВ "Аргон"', "ЧЕК N 5940030")
     assert normalize(_ModelAnswer(is_receipt=True, total=1, currency="UAH", date=None, source="editor",
                                   candidates=[])).source == "editor"
+    edited = normalize(_ModelAnswer(is_receipt=True, total=772, currency="UAH", date=None, source="paper",
+                                    hand_edited=True, candidates=[_Candidate(label="СУМА", amount=772)]))
+    assert edited.hand_edited and edited.total == Decimal("772.00")
     assert normalize(_ModelAnswer(is_receipt=True, total=1, currency="UAH", date=None, source="hacked",
                                   candidates=[])).source == "other"
     assert norm(None, "NI") == ("", "")  # "Receipt No: NI" on the Dubai slip is not a number

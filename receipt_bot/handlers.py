@@ -245,10 +245,17 @@ def manual_view(rid: str, rec: Recognition) -> tuple[str, InlineKeyboardMarkup]:
 
 
 def confidence(rec: Recognition, pick: int, manual: bool) -> tuple[int | None, str]:
-    """Score 0-100 and a word with the reasons, from our own checks: the model's self-assessment isn't calibrated."""
+    """Score 0-100 and a word with the reasons, from our own checks: the model's self-assessment isn't calibrated.
+    A typed amount has no score, but the red flags still show: most fakes sent on 30.09 had the amount typed in."""
+    flags = [why for bad, why in [
+        (rec.not_receipt, "не схоже на чек"),
+        (rec.source == "editor", "набрано в редакторі"),  # bank apps and e-receipts are "app" and lose nothing
+        (rec.source == "handwritten", "написано від руки"),
+        (rec.hand_edited, "суму виправлено від руки"),  # a real receipt, 772 crossed out, 792 written over
+    ] if bad]
     if manual:
-        return None, "вручну"
-    score, why = 100, []
+        return None, "вручну" + (f": {', '.join(flags)}" if flags else "")
+    score, why = 100 - 50 * len(flags), flags
     if not rec.has_total:
         score, why = score - 40, why + ["модель не певна підсумку"]
     elif pick != 0:
@@ -263,8 +270,6 @@ def confidence(rec: Recognition, pick: int, manual: bool) -> tuple[int | None, s
         score, why = score - 40, why + ["нема продавця"]
     if not rec.receipt_number:  # a ФОП's "Рахунок" may have none
         score, why = score - 10, why + ["нема номера чека"]
-    if rec.source == "editor":  # bank apps and e-receipts are "app" and lose nothing
-        score, why = score - 50, why + ["набрано в редакторі"]
     score = max(score, 0)
     level = "висока" if score >= 90 else "середня" if score >= 60 else "низька"
     return score, f"{level}: {', '.join(why)}" if why else level
@@ -501,7 +506,7 @@ async def on_logout(message: Message, users: Users, logins: dict[int, asyncio.Ta
 
 def not_a_receipt(rec: Recognition) -> Recognition:
     """No amount buttons, but manual entry stays (the model can be wrong) and keeps the date it read."""
-    return replace(rec, is_receipt=True, candidates=[], has_total=False)
+    return replace(rec, is_receipt=True, candidates=[], has_total=False, not_receipt=True)
 
 
 @router.message(F.photo | F.document)
