@@ -229,7 +229,7 @@ def test_a_duplicate_waits_for_the_person():
     text, markup = edits[-1]
     assert "Схожий чек уже є в таблиці: 126.00 AED, чек від 2026-09-30" in text and "Андрій" in text and "@andrii" not in text and "old1" in text
     actions = [ReceiptAction.unpack(b.callback_data).action for r in markup.inline_keyboard for b in r]
-    assert actions == ["force", "back", "cancel"]
+    assert actions == ["cancel", "back", "force"]  # "save anyway" last: it got tapped out of habit
 
 
 def test_no_duplicate_saves_right_away():

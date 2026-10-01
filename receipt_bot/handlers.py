@@ -332,10 +332,11 @@ def duplicate_view(rid: str, item: Pending, kind: str, row: list) -> tuple[str, 
         text = (f"⚠️ Схожий чек уже є в таблиці: {found}{dated}, додав {who} ({when}ID {_cell(row, 8)[:16]}).\n"
                 "Якщо це інший чек, записуй.")
     kb = InlineKeyboardBuilder()
-    kb.button(text=f"✅ Все одно записати {fmt(amount, item.recognition.currency)}",
-              callback_data=ReceiptAction(rid=rid, action="force"))
-    kb.button(text="↩️ Назад", callback_data=ReceiptAction(rid=rid, action="back"))
+    # "Save anyway" last and without the green tick: live 01.10 it was tapped out of habit 3 s after the warning
     kb.button(text="✖️ Скасувати", callback_data=ReceiptAction(rid=rid, action="cancel"))
+    kb.button(text="↩️ Назад", callback_data=ReceiptAction(rid=rid, action="back"))
+    kb.button(text=f"Все одно записати {fmt(amount, item.recognition.currency)}",
+              callback_data=ReceiptAction(rid=rid, action="force"))
     kb.adjust(1)
     return text, kb.as_markup()
 
