@@ -52,7 +52,7 @@ a word plus the reasons ("середня: валюта за країною"), so
 | Currency taken from the country or not visible | 20 |
 | No date; no receipt number (a sole trader's invoice may have none) | 10 each |
 
-A typed amount has no score but keeps the red flags: "вручну: не схоже на чек". If a printed amount is crossed out and
+A typed amount has no score but keeps the red flags: "вручну: не схоже на чек". If the typed amount is none of the amounts read on the receipt: "вручну: на чеку 772.00 грн". If a printed amount is crossed out and
 rewritten in pen, the bot offers the printed one; the written one can only be typed in.
 
 This is not an authenticity check: a neat fake with a merchant, number and date on plain paper passes. The score
@@ -60,7 +60,7 @@ catches misreads and lazy fakes. Only the tax service (ДПС) can confirm a fis
 
 Tested 01.10 on 43 photos (25 ours, 16 from the client's sheet, 2 handwritten fakes): the primary model got the right
 amount on 41 of 41 receipts; a Google Doc, a sticky note, a notebook page and a candy box all scored 0. The model
-notices a pen-corrected amount on only 1 of 3 receipts, so there it's the printed-amount choice that protects.
+notices a pen-corrected amount on only 1 of 3 receipts (describing the pen in a first field didn't help: it doesn't see the ink), so there the printed-amount choice and the "на чеку 772.00" flag on the typed one protect.
 
 The photo print is a 256-bit dHash; on 25 receipts a recompressed copy differs by ≤10 bits, another receipt by ≥43,
 threshold 24. PrivatBank's terminal id (TS202638, the same on every receipt) is never taken as the receipt number.
