@@ -32,6 +32,10 @@ The bot talks to people in Ukrainian; quoted bot messages below are translations
    - the same amount and receipt date. The currency doesn't have to match: 126 AED today and 126 "USD" from
      yesterday's misread are one bill. This is what catches two different shots of one receipt. Without a date,
      rows with the same amount and currency from the last 2 days count.
+
+   The same photo is never saved twice. A similar receipt or the same number can be saved with "Save anyway",
+   and "Level" keeps "дубль ID". If the sheet didn't answer the check, the receipt is saved marked "дубль не
+   перевірено". Check-and-save runs one at a time, so two quick confirms of the same photo can't both slip in.
 5. After confirmation the photo goes to Drive, the row goes to the sheet, and the bot replies "Saved".
 
 Sheet columns: **Added · Receipt date · Sender** (name, @username and Telegram ID) **· Email · Amount · Currency ·
