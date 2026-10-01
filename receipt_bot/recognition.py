@@ -73,8 +73,9 @@ SYSTEM_PROMPT = (
     "merchant = who issued the document as printed: shop, company, ФОП or bank (e.g. 'ТОВ \"Аргон\"', "
     "'ПриватБанк', 'BATONI RESTAURANT LLC'); null if no issuer is printed. "
     "receipt_number = this document's own number as printed: 'ЧЕК №', 'Квитанція №', 'Код документа', 'Receipt No', "
-    "invoice number; if there is none, the card approval code or RRN. Never the shop's register numbers "
-    "(ФН, ЗН, ПН, ІД, МАС): they are the same on every receipt of that shop. null if none. "
+    "invoice number; on a bank receipt the 'Код документа'; if there is none, the card approval code or RRN. "
+    "Never a number that is the same on every receipt of that shop or terminal: register numbers (ФН, ЗН, ПН, ІД, "
+    "МАС) or the terminal id (TS…, TID, 'Термінал'). null if none. "
     "source = what the photo shows: 'paper' (a printed receipt or slip), 'app' (a banking or shop app, an "
     "e-receipt or a PDF on a screen), 'editor' (text typed in a word processor or notes app: Word, Google Docs, "
     "Notes, with its toolbar, ruler or cursor), 'handwritten' (written by hand: a note, a notebook page), 'other'. "
@@ -322,6 +323,8 @@ def with_fee(total: Decimal, total_label: str, rows: list[tuple[str, Decimal]]) 
 def receipt_number(text: str | None) -> str:
     """As printed, if it looks like a number: at least 3 digits ("NI", "-" and the like are not)."""
     text = clean_text(text or "")[:40]
+    if re.fullmatch(r"T[S5]\d{5,}", number_key(text)):
+        return ""  # PrivatBank's terminal (TS202638): the same on every receipt, the model took it anyway
     return text if sum(ch.isdigit() for ch in text) >= 3 else ""
 
 
