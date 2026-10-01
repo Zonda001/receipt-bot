@@ -263,6 +263,8 @@ def confidence(rec: Recognition, pick: int, manual: bool) -> tuple[int | None, s
         score, why = score - 40, why + ["нема продавця"]
     if not rec.receipt_number:  # a ФОП's "Рахунок" may have none
         score, why = score - 10, why + ["нема номера чека"]
+    if rec.source == "editor":  # bank apps and e-receipts are "app" and lose nothing
+        score, why = score - 50, why + ["набрано в редакторі"]
     score = max(score, 0)
     level = "висока" if score >= 90 else "середня" if score >= 60 else "низька"
     return score, f"{level}: {', '.join(why)}" if why else level

@@ -65,6 +65,10 @@ def test_a_typed_up_document_scores_low():
     fake = Recognition(is_receipt=True, candidates=[Candidate("На сумму", Decimal("100500.00"))], has_total=True,
                        currency_source="unknown")
     assert confidence(fake, 0, False) == (20, "низька: валюту не видно, нема дати, нема продавця, нема номера чека")
+    # the same with every field made up: only the editor around it is left to show
+    dressed = replace(AED, source="editor")
+    assert confidence(dressed, 0, False) == (50, "низька: набрано в редакторі")
+    assert confidence(replace(AED, source="app"), 0, False) == (100, "висока")  # a Monobank screenshot is fine
     nothing = Recognition(is_receipt=True, currency_source="unknown")
     assert confidence(nothing, 0, False)[0] == 0  # never below zero
 
@@ -90,6 +94,10 @@ def test_merchant_and_number_are_cleaned():
                                      receipt_number=number, candidates=[_Candidate(label="СУМА", amount=1)]))
         return rec.merchant, rec.receipt_number
     assert norm('ТОВ "Аргон"\u202e', "ЧЕК N 5940030") == ('ТОВ "Аргон"', "ЧЕК N 5940030")
+    assert normalize(_ModelAnswer(is_receipt=True, total=1, currency="UAH", date=None, source="editor",
+                                  candidates=[])).source == "editor"
+    assert normalize(_ModelAnswer(is_receipt=True, total=1, currency="UAH", date=None, source="hacked",
+                                  candidates=[])).source == "other"
     assert norm(None, "NI") == ("", "")  # "Receipt No: NI" on the Dubai slip is not a number
     assert norm("x" * 100, "1" * 100) == ("x" * 60, "1" * 40)
 
