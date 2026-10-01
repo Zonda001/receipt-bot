@@ -101,6 +101,7 @@ class Pending:
     photo_print: str = ""    # for the duplicate check; "" if the photo didn't open
     pick: int = 0            # which candidate was confirmed: the confidence column depends on it
     chosen: tuple[Decimal, bool] | None = None  # (amount, manual) waiting behind a duplicate warning
+    dup: str = ""            # ID of the row it looks like, once "save anyway" is on offer: goes into the sheet
 
 
 class PendingStore:
@@ -322,23 +323,25 @@ def duplicate_of(rows: list[list], amount: Decimal, rec: Recognition, photo_prin
 
 
 def duplicate_view(rid: str, item: Pending, kind: str, row: list) -> tuple[str, InlineKeyboardMarkup]:
-    amount, _ = item.chosen
+    """The same photo is refused outright; a similar receipt or the same number can still be saved, marked."""
     who = clean_text(_cell(row, 2).split(" (")[0])[:40] or "хтось"
     when = f"{_cell(row, 0)[:16]}, " if _cell(row, 0) else ""
     sum_there = to_amount(_cell(row, 4) or None)
     found = fmt(sum_there, _cell(row, 5)[:8]) if sum_there else f"{_cell(row, 4)[:20]} {_cell(row, 5)[:8]}".strip()
-    if kind == "photo":
-        text = f"⚠️ Це фото вже є в таблиці: {found}, додав {who} ({when}ID {_cell(row, 8)[:16]})."
-    elif kind == "number":
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✖️ Скасувати", callback_data=ReceiptAction(rid=rid, action="cancel"))
+    if kind == "photo":  # prints of different receipts are 43+ bits apart, the bar is 24: no honest reason to resend
+        return (f"⚠️ Це фото вже записано: {found}, додав {who} ({when}ID {_cell(row, 8)[:16]}). "
+                "Вдруге не записую.", kb.as_markup())
+    if kind == "number":
         text = (f"⚠️ Чек № {_cell(row, 13)[:40]} на {found} уже є в таблиці, "
                 f"додав {who} ({when}ID {_cell(row, 8)[:16]}).")
     else:
         dated = f", чек від {_cell(row, 1)[:10]}" if _cell(row, 1) else ""
         text = (f"⚠️ Схожий чек уже є в таблиці: {found}{dated}, додав {who} ({when}ID {_cell(row, 8)[:16]}).\n"
                 "Якщо це інший чек, записуй.")
-    kb = InlineKeyboardBuilder()
     # "Save anyway" last and without the green tick: live 01.10 it was tapped out of habit 3 s after the warning
-    kb.button(text="✖️ Скасувати", callback_data=ReceiptAction(rid=rid, action="cancel"))
+    amount, _ = item.chosen
     kb.button(text="↩️ Назад", callback_data=ReceiptAction(rid=rid, action="back"))
     kb.button(text=f"Все одно записати {fmt(amount, item.recognition.currency)}",
               callback_data=ReceiptAction(rid=rid, action="force"))
@@ -643,7 +646,8 @@ async def confirm(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: bo
     if found is None:
         return await finalize(bot, rid, item, amount, manual, users, google, saves)
     log.info("receipt %s: looks like a %s duplicate", rid, found[0])
-    item.chosen = (amount, manual)
+    kind, row = found
+    item.chosen, item.dup = (None, "") if kind == "photo" else ((amount, manual), _cell(row, 8)[:16] or "?")
     item.status = "pending"
     await edit_receipt(bot, item, *duplicate_view(rid, item, *found))
 
@@ -652,6 +656,8 @@ async def finalize(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: b
                    users: Users, google: GoogleStore, saves: SaveLimit) -> None:
     """Call right after item.status = "processing". Saves the receipt or puts it back to pending with buttons."""
     shown = fmt(amount, item.recognition.currency) + (" (введено вручну)" if manual else "")
+    if item.dup:  # the warning message is about to be replaced: say here that it was saved over one
+        shown += f" — попри попередження про дубль (ID {item.dup})"
     try:
         link = await save(bot, rid, item, amount, manual, users, google, saves)
     except NotSaved as e:
@@ -686,6 +692,8 @@ async def save(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: bool,
         now = now_local()
         rec = item.recognition
         score, level = confidence(rec, item.pick, manual, amount)
+        if item.dup:  # saved over a warning: the accountant filters by "дубль"
+            level += f"{', ' if ':' in level else ': '}дубль {item.dup}"
         row = ReceiptRow(receipt_id=rid, added_at=now.strftime("%Y-%m-%d %H:%M"),
                          receipt_date=rec.receipt_date.isoformat() if rec.receipt_date else "",
                          sender=item.sender, email=email, amount=float(amount), currency=rec.currency, manual=manual,
@@ -771,7 +779,7 @@ async def on_action(query: CallbackQuery, callback_data: ReceiptAction, bot: Bot
         if item.status == "pending":  # while we waited for Telegram, the receipt may have been confirmed or cancelled
             await edit_receipt(bot, item, *manual_view(rid, item.recognition))
     elif callback_data.action == "back":
-        item.chosen = None
+        item.chosen, item.dup = None, ""
         if (await state.get_data()).get("rid") == rid:
             await state.clear()
         with suppress(TelegramAPIError):

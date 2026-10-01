@@ -190,7 +190,7 @@ def test_old_short_and_broken_rows_are_skipped():
 
 # --- the flow ---
 
-def flow(rows_or_error):
+def flow(rows_or_error, photo=""):
     """One pending receipt; tap "ok" -> (edits, saved)."""
     edits, saved = [], []
 
@@ -210,7 +210,8 @@ def flow(rows_or_error):
         handlers.edit_receipt, handlers.finalize = edit, fake_finalize
         try:
             pending = PendingStore()
-            rid = pending.add(Pending(user_id=1, file_id="f", recognition=AED, created=float("inf"), chat_id=1, msg_id=1))
+            rid = pending.add(Pending(user_id=1, file_id="f", recognition=AED, created=float("inf"), chat_id=1, msg_id=1,
+                                      photo_print=photo))
             google = SimpleNamespace(rows=rows)
             item = pending.get(rid)
             item.status = "processing"
@@ -230,6 +231,16 @@ def test_a_duplicate_waits_for_the_person():
     assert "Схожий чек уже є в таблиці: 126.00 AED, чек від 2026-09-30" in text and "Андрій" in text and "@andrii" not in text and "old1" in text
     actions = [ReceiptAction.unpack(b.callback_data).action for r in markup.inline_keyboard for b in r]
     assert actions == ["cancel", "back", "force"]  # "save anyway" last: it got tapped out of habit
+    assert item.dup == "old1"
+
+
+def test_the_same_photo_is_refused_outright():
+    p = photo_print(receipt_jpeg(["TOTAL 126.00 AED"]))
+    item, rid, edits, saved = flow([row(print_=p)], photo=p)
+    text, markup = edits[-1]
+    assert saved == [] and "Вдруге не записую" in text and item.chosen is None and item.dup == ""
+    actions = [ReceiptAction.unpack(b.callback_data).action for r in markup.inline_keyboard for b in r]
+    assert actions == ["cancel"]  # no "save anyway", and a forged "force" finds nothing chosen
 
 
 def test_no_duplicate_saves_right_away():
@@ -344,3 +355,42 @@ def test_the_flag_keeps_the_currency_read_from_the_photo(monkeypatch):
     rec = asyncio.run(scenario())
     assert rec.currency == "EUR" and rec.read_currency == "UAH"
     assert seen == [(None, "вручну: на чеку 79.16 грн")]
+
+
+def test_saved_over_a_warning_is_marked_in_the_sheet_and_the_chat():
+    from receipt_bot.handlers import SaveLimit, finalize
+
+    rows, said = [], []
+
+    class Google:
+        async def has_access(self, email):
+            return True
+
+        async def ping(self):
+            pass
+
+        async def save_receipt(self, photo, mime, name, row):
+            rows.append(row)
+            return "link"
+
+    class Bot:
+        async def download(self, file_id):
+            return io.BytesIO(receipt_jpeg(["TOTAL 126.00"]))
+
+        async def edit_message_text(self, **kwargs):
+            said.append(kwargs["text"])
+
+        async def send_message(self, chat_id, text, **kwargs):
+            said.append(text)
+
+    class Users:
+        def email(self, user_id):
+            return "a@x"
+
+        def via_domain(self, user_id):
+            return False
+
+    item = Pending(user_id=1, file_id="f", recognition=AED, created=0.0, chat_id=1, msg_id=1, dup="old1")
+    asyncio.run(finalize(Bot(), "rid", item, Decimal("126.00"), False, Users(), Google(), SaveLimit(5, 10**9)))
+    assert rows[0].level == "висока: дубль old1"
+    assert all("попри попередження про дубль (ID old1)" in text for text in said)
