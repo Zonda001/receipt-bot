@@ -267,3 +267,48 @@ def test_save_anyway_saves_what_was_chosen(monkeypatch):
     pending.get(rid).chosen = (Decimal("50.00"), True)
     asyncio.run(handlers.on_action(query, force, None, None, pending, None, None, None))
     assert saved == [(Decimal("50.00"), True, "processing")]
+
+
+# --- a typed amount that isn't on the receipt (01.10: 772 printed, 792 written in pen, the model saw no pen) ---
+
+def test_a_typed_amount_that_is_not_on_the_receipt_is_flagged():
+    printed = replace(AED, currency="UAH", candidates=[Candidate("СУМА", Decimal("772.00"))])
+    assert confidence(printed, 0, True, Decimal("792.00")) == (None, "вручну: на чеку 772.00 грн")
+    assert confidence(printed, 0, True, Decimal("772.00")) == (None, "вручну")  # typed what's printed: fine
+    assert confidence(replace(printed, candidates=[]), 0, True, Decimal("792.00")) == (None, "вручну")  # nothing read
+    other = replace(printed, candidates=[Candidate("СУМА", Decimal("772.00")), Candidate("Сума + комісія",
+                                                                                      Decimal("777.00"))])
+    assert confidence(other, 0, True, Decimal("777.00")) == (None, "вручну")  # any amount read on it counts
+
+
+def test_save_writes_the_mismatch_into_the_sheet():
+    from receipt_bot.handlers import SaveLimit, save
+
+    rows = []
+
+    class Google:
+        async def has_access(self, email):
+            return True
+
+        async def ping(self):
+            pass
+
+        async def save_receipt(self, photo, mime, name, row):
+            rows.append(row)
+            return "link"
+
+    class Bot:
+        async def download(self, file_id):
+            return io.BytesIO(receipt_jpeg(["СУМА 772.00"]))
+
+    class Users:
+        def email(self, user_id):
+            return "a@x"
+
+        def via_domain(self, user_id):
+            return False
+
+    printed = replace(AED, currency="UAH", candidates=[Candidate("СУМА", Decimal("772.00"))])
+    item = Pending(user_id=1, file_id="f", recognition=printed, created=0.0, chat_id=1, msg_id=1)
+    asyncio.run(save(Bot(), "rid", item, Decimal("792.00"), True, Users(), Google(), SaveLimit(5, 10**9)))
+    assert rows[0].level == "вручну: на чеку 772.00 грн" and rows[0].score is None

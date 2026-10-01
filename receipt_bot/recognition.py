@@ -59,8 +59,6 @@ SYSTEM_PROMPT = (
     "You read photos of payment documents in any language and currency: shop receipts (fiscal cheques), "
     "bank payment receipts and duplicates (e.g. PrivatBank 'Квитанція' / 'Дублікат чека'), invoices, "
     "currency-exchange receipts, card slips. Return ONLY JSON matching the schema. "
-    "pen_marks = first look for ink: describe in a few words everything written by hand with a pen on the photo "
-    "(digits, words, a signature, a stamp) and where it is, or 'none'. "
     "total = the final amount paid: prefer lines like 'ДО СПЛАТИ' / 'ДО ОПЛАТИ' / 'DO ZAPŁATY' / 'AMOUNT DUE' / "
     "'TOTAL'; otherwise the grand total 'СУМА' / 'РАЗОМ' / 'SUMA' / 'RAZEM' / 'GRAND TOTAL'. "
     "On a bank payment receipt: the 'Сума' line (the payment amount; a separate 'Комісія' fee is its own candidate). "
@@ -68,8 +66,7 @@ SYSTEM_PROMPT = (
     "Never use VAT (ПДВ / PTU / VAT), cash tendered (ГОТІВКА / GOTÓWKA / CASH), change (РЕШТА / RESZTA / CHANGE), "
     "or a subtotal before discount. "
     "Amounts are what is printed: if a printed amount is crossed out or written over by hand, still use the printed "
-    "one and set hand_edited=true (also when an amount is added by hand). A signature or a stamp alone is not "
-    "hand_edited. "
+    "one and set hand_edited=true (also when an amount is added by hand). "
     "candidates = every amount that could plausibly be the total, including the total itself, with its label exactly "
     "as printed; at most 8, only total/sum/payment/fee lines, never individual items. "
     "date = document date as YYYY-MM-DD if printed, else null. "
@@ -94,15 +91,12 @@ SYSTEM_PROMPT = (
 SOURCES = ("paper", "app", "editor", "handwritten", "other")
 
 # Keep this field order: with is_receipt first the model said "not a receipt" without reading any amount (README).
-# pen_marks goes first on purpose: described before anything else, the pen is seen (one field among ten, it wasn't).
 RESPONSE_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["pen_marks", "hand_edited", "candidates", "total", "country", "currency", "date", "merchant",
-                 "receipt_number", "source", "is_receipt"],
+    "required": ["candidates", "total", "country", "currency", "date", "merchant", "receipt_number", "source",
+                 "hand_edited", "is_receipt"],
     "properties": {
-        "pen_marks": {"type": "string"},
-        "hand_edited": {"type": "boolean"},
         "candidates": {
             "type": "array",
             "items": {
@@ -119,6 +113,7 @@ RESPONSE_SCHEMA = {
         "merchant": {"type": ["string", "null"]},
         "receipt_number": {"type": ["string", "null"]},
         "source": {"type": "string", "enum": list(SOURCES)},
+        "hand_edited": {"type": "boolean"},
         "is_receipt": {"type": "boolean"},
     },
 }
@@ -178,7 +173,6 @@ class _ModelAnswer(BaseModel):
     receipt_number: str | None = None
     source: str | None = None
     hand_edited: bool = False
-    pen_marks: str | None = None
     candidates: list[_Candidate]
 
 
@@ -211,7 +205,6 @@ class Recognition:
     receipt_number: str = ""  # "" if not printed or doesn't look like a number
     source: str = "other"     # paper | app | editor | handwritten | other: a typed-up "receipt" shows the editor
     hand_edited: bool = False  # a printed amount crossed out and rewritten by hand
-    pen_marks: str = ""        # what the model saw written in pen: for the logs and the regression, not the sheet
     not_receipt: bool = False  # the model said "not a receipt"; manual entry stays, but the sheet should know
 
     @property
@@ -398,7 +391,6 @@ def normalize(answer: _ModelAnswer) -> Recognition:
         receipt_number=receipt_number(answer.receipt_number),
         source=answer.source if answer.source in SOURCES else "other",
         hand_edited=answer.hand_edited,
-        pen_marks=clean_text(answer.pen_marks or "")[:120],
     )
 
 

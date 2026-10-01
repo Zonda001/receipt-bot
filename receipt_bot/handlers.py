@@ -244,7 +244,8 @@ def manual_view(rid: str, rec: Recognition) -> tuple[str, InlineKeyboardMarkup]:
             f"Якщо валюта інша, допиши її код: 126 AED", kb.as_markup())
 
 
-def confidence(rec: Recognition, pick: int, manual: bool) -> tuple[int | None, str]:
+def confidence(rec: Recognition, pick: int, manual: bool,
+               typed: Decimal | None = None) -> tuple[int | None, str]:
     """Score 0-100 and a word with the reasons, from our own checks: the model's self-assessment isn't calibrated.
     A typed amount has no score, but the red flags still show: most fakes sent on 30.09 had the amount typed in."""
     flags = [why for bad, why in [
@@ -254,6 +255,9 @@ def confidence(rec: Recognition, pick: int, manual: bool) -> tuple[int | None, s
         (rec.hand_edited, "суму виправлено від руки"),  # a real receipt, 772 crossed out, 792 written over
     ] if bad]
     if manual:
+        # The model can't see a pen on 2 of 3 corrected receipts, but it reads the printed 772: a typed 792 differs.
+        if typed is not None and rec.candidates and typed not in {c.amount for c in rec.candidates}:
+            flags.append(f"на чеку {fmt(rec.candidates[0].amount, rec.currency)}")
         return None, "вручну" + (f": {', '.join(flags)}" if flags else "")
     score, why = 100 - 50 * len(flags), flags
     if not rec.has_total:
@@ -680,7 +684,7 @@ async def save(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: bool,
         await validate_image(photo)  # only a real photo goes to Drive, even if recognition was skipped
         now = now_local()
         rec = item.recognition
-        score, level = confidence(rec, item.pick, manual)
+        score, level = confidence(rec, item.pick, manual, amount)
         row = ReceiptRow(receipt_id=rid, added_at=now.strftime("%Y-%m-%d %H:%M"),
                          receipt_date=rec.receipt_date.isoformat() if rec.receipt_date else "",
                          sender=item.sender, email=email, amount=float(amount), currency=rec.currency, manual=manual,

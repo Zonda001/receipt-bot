@@ -25,22 +25,45 @@ The bot talks to people in Ukrainian; quoted bot messages below are translations
    the bank fee, type it manually or cancel. A typed amount can carry a currency (`126 AED`, `$12.50`): it replaces
    the recognized one. If the model says USD for a shop in a country with its own currency, the bot takes that
    country's currency: Gemma reads the new UAE dirham sign as `$`.
-4. Before saving, the bot looks for this receipt in the sheet. The same photo (even recompressed by Telegram) or the
-   same amount, currency and receipt date -> a warning "already in the sheet, added by …" and a "Save anyway"
-   button. Two different shots of one receipt are caught by the amount and date. Without a date, rows with the same
-   amount from the last 2 days count.
+4. Before saving, the bot looks for this receipt in the sheet and warns "already in the sheet, added by …" with a
+   "Save anyway" button:
+   - the same photo, even recompressed by Telegram (photo print);
+   - the same receipt number and amount;
+   - the same amount and receipt date. The currency doesn't have to match: 126 AED today and 126 "USD" from
+     yesterday's misread are one bill. This is what catches two different shots of one receipt. Without a date,
+     rows with the same amount and currency from the last 2 days count.
 5. After confirmation the photo goes to Drive, the row goes to the sheet, and the bot replies "Saved".
 
 Sheet columns: **Added · Receipt date · Sender** (name, @username and Telegram ID) **· Email · Amount · Currency ·
-Photo** (Drive link) **· Manual amount · receipt ID · Confidence · Level · Photo print**. The header in the sheet
-itself is in Ukrainian.
+Photo** (Drive link) **· Manual amount · receipt ID · Confidence · Level · Photo print · Merchant · Receipt number**.
+The header in the sheet itself is in Ukrainian. An older sheet gets only the new headers; renamed old ones stay.
 
-Confidence (0-100) comes from the bot's own checks, not from asking the model: its self-assessment isn't calibrated.
-Minus 40 if the model named no total that is among the receipt lines; minus 30 if the person picked another amount;
-minus 20 if the currency came from the country or wasn't visible; minus 10 without a date. "Level" is a word plus
-the reasons ("середня: валюта за країною"), so the accountant sees what to check. A typed amount: "вручну", no number.
+### Confidence
+
+A 0-100 score from the bot's own checks, not from asking the model: its self-assessment isn't calibrated. "Level" is
+a word plus the reasons ("середня: валюта за країною"), so the accountant sees what to check.
+
+| What | Minus |
+|---|---|
+| Not a receipt; typed in an editor (Word, Google Docs); handwritten; amount corrected in pen | 50 each |
+| The model named no total that is among the receipt lines | 40 |
+| No merchant (every real receipt in the sample had one) | 40 |
+| The person picked another amount | 30 |
+| Currency taken from the country or not visible | 20 |
+| No date; no receipt number (a sole trader's invoice may have none) | 10 each |
+
+A typed amount has no score but keeps the red flags: "вручну: не схоже на чек". If a printed amount is crossed out and
+rewritten in pen, the bot offers the printed one; the written one can only be typed in.
+
+This is not an authenticity check: a neat fake with a merchant, number and date on plain paper passes. The score
+catches misreads and lazy fakes. Only the tax service (ДПС) can confirm a fiscal receipt is real.
+
+Tested 01.10 on 43 photos (25 ours, 16 from the client's sheet, 2 handwritten fakes): the primary model got the right
+amount on 41 of 41 receipts; a Google Doc, a sticky note, a notebook page and a candy box all scored 0. The model
+notices a pen-corrected amount on only 1 of 3 receipts, so there it's the printed-amount choice that protects.
+
 The photo print is a 256-bit dHash; on 25 receipts a recompressed copy differs by ≤10 bits, another receipt by ≥43,
-threshold 24. An older sheet gets only the new headers J-L; renamed old ones are left alone.
+threshold 24. PrivatBank's terminal id (TS202638, the same on every receipt) is never taken as the receipt number.
 
 ## Architecture
 
