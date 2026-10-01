@@ -334,7 +334,7 @@ def normalize(answer: _ModelAnswer) -> Recognition:
     country = (answer.country or "").strip().upper()
     source = "model"
     if currency == "USD" and country in LOCAL_CURRENCY:
-        currency = LOCAL_CURRENCY[country]  # a local sign read as $: Gemma sees the 2025 dirham sign so (Vadym 30.09)
+        currency = LOCAL_CURRENCY[country]  # a local sign read as $: Gemma sees the 2025 dirham sign so
         source = "country"
     if not re.fullmatch(r"[A-Z]{3}", currency):
         currency, source = "UAH", "unknown"

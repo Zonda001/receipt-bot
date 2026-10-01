@@ -34,7 +34,7 @@ def test_parse_amount_rejects(text):
 
 @pytest.mark.parametrize("text, expected", [
     ("126", (Decimal("126.00"), None)),
-    ("126 AED", (Decimal("126.00"), "AED")),  # Vadym 30.09: this used to be refused
+    ("126 AED", (Decimal("126.00"), "AED")),  # this used to be refused
     ("126aed", (Decimal("126.00"), "AED")),
     ("AED 126", (Decimal("126.00"), "AED")),
     ("$12.50", (Decimal("12.50"), "USD")),
@@ -86,7 +86,7 @@ def test_nonsense_amounts_and_currency():
 
 
 @pytest.mark.parametrize("currency, country, expected", [
-    ("USD", "AE", "AED"),  # Gemma reads the 2025 dirham sign as $ on a Dubai receipt (Vadym 30.09)
+    ("USD", "AE", "AED"),  # Gemma reads the 2025 dirham sign as $ on a Dubai receipt
     ("USD", "de", "EUR"),
     ("USD", "US", "USD"),
     ("USD", "EC", "USD"),  # Ecuador pays in dollars: not in the table, left alone

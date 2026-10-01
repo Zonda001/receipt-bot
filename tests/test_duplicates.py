@@ -1,4 +1,4 @@
-"""Duplicates and the confidence column (Vadym 30.09: the same receipt got written twice; "confidence/scoring")."""
+"""Duplicates and the confidence column: the same receipt must not get written twice unnoticed."""
 import asyncio
 import io
 from datetime import date, datetime

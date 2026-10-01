@@ -779,7 +779,7 @@ async def on_manual_amount(message: Message, bot: Bot, state: FSMContext, pendin
         await message.answer("Не схоже на суму. Введи число, наприклад 123.45, або з валютою: 126 AED")
         return
     amount, currency = parsed
-    if currency:  # the model may misread the currency (AED -> USD, Vadym 30.09)
+    if currency:  # the model may misread the currency (AED -> USD)
         item.recognition = replace(item.recognition, currency=currency)
     item.status = "processing"
     await state.clear()
