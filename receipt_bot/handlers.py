@@ -289,7 +289,8 @@ def _added(row: list) -> datetime | None:
 def duplicate_of(rows: list[list], amount: Decimal, rec: Recognition, photo_print: str,
                  now: datetime) -> tuple[str, list] | None:
     """("photo" | "number" | "similar", the latest such row) or None. Photo: the same picture sent again.
-    Number: same receipt number and amount. Similar: same amount, currency and date (two friends, one bar bill)."""
+    Number: same receipt number and amount. Similar: same amount and date (two friends, one bar bill);
+    without a date, same amount and currency added lately."""
     photo = numbered = similar = None
     day = rec.receipt_date.isoformat() if rec.receipt_date else ""
     key = number_key(rec.receipt_number) if rec.receipt_number else ""
@@ -298,14 +299,16 @@ def duplicate_of(rows: list[list], amount: Decimal, rec: Recognition, photo_prin
             continue
         if photo_print and same_photo(photo_print, _cell(row, 11)):
             photo = row
-        if to_amount(_cell(row, 4) or None) != amount or _cell(row, 5).upper() != rec.currency:
+        if to_amount(_cell(row, 4) or None) != amount:
             continue
+        # Currency only matters without a date: 126 AED today and 126 "USD" from a misread yesterday are one bill.
         if key and number_key(_cell(row, 13)) == key:
             numbered = row
         if day and _cell(row, 1):
             if _cell(row, 1) == day:
                 similar = row
-        elif (added := _added(row)) and now - added <= timedelta(days=UNDATED_DUPLICATE_DAYS):
+        elif _cell(row, 5).upper() == rec.currency and (added := _added(row)) \
+                and now - added <= timedelta(days=UNDATED_DUPLICATE_DAYS):
             similar = row
     for kind, found in (("photo", photo), ("number", numbered), ("similar", similar)):
         if found is not None:

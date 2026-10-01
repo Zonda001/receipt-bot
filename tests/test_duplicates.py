@@ -111,7 +111,8 @@ def test_merchant_and_number_are_cleaned():
     assert edited.hand_edited and edited.total == Decimal("772.00")
     assert normalize(_ModelAnswer(is_receipt=True, total=1, currency="UAH", date=None, source="hacked",
                                   candidates=[])).source == "other"
-    assert norm(None, "NI") == ("", "")
+    assert norm(None, "NI") == ("", "") and norm(None, "AB-1") == ("", "")
+    assert norm(None, "Чек # SdLx6RmdCZI") == ("", "Чек # SdLx6RmdCZI")  # Checkbox, live 01.10
     assert norm(None, "TS202638") == ("", "") and norm(None, "T5202638") == ("", "")  # the terminal, live 01.10
     assert norm(None, "9300-3454-3332-7074")[1] == "9300-3454-3332-7074"  # "Receipt No: NI" on the Dubai slip is not a number
     assert norm("x" * 100, "1" * 100) == ("x" * 60, "1" * 40)
@@ -150,8 +151,14 @@ def test_same_amount_currency_and_date_is_similar():
 
 def test_another_date_or_currency_or_amount_is_not():
     assert duplicate_of([row(day="2026-09-29")], Decimal("126.00"), AED, "", NOW) is None
-    assert duplicate_of([row(currency="USD")], Decimal("126.00"), AED, "", NOW) is None
     assert duplicate_of([row(amount=126.5)], Decimal("126.00"), AED, "", NOW) is None
+    undated = Recognition(is_receipt=True, currency="AED")
+    assert duplicate_of([row(day="", currency="UAH")], Decimal("126.00"), undated, "", NOW) is None
+
+
+def test_a_misread_currency_still_matches_on_the_date():
+    # live 01.10: the Dubai bill was saved on 30.09 as 126 USD; today it reads 126 AED, and nothing warned
+    assert duplicate_of([row(currency="USD")], Decimal("126.00"), AED, "", NOW)[0] == "similar"
 
 
 def test_without_a_date_only_recent_rows_count():

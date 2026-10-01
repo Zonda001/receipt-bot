@@ -321,11 +321,13 @@ def with_fee(total: Decimal, total_label: str, rows: list[tuple[str, Decimal]]) 
 
 
 def receipt_number(text: str | None) -> str:
-    """As printed, if it looks like a number: at least 3 digits ("NI", "-" and the like are not)."""
+    """As printed, if it looks like a number: 3+ digits, or 6+ letters and digits with at least one digit."""
     text = clean_text(text or "")[:40]
     if re.fullmatch(r"T[S5]\d{5,}", number_key(text)):
         return ""  # PrivatBank's terminal (TS202638): the same on every receipt, the model took it anyway
-    return text if sum(ch.isdigit() for ch in text) >= 3 else ""
+    digits, key = sum(ch.isdigit() for ch in text), number_key(text)
+    # "5940030", or a Checkbox code like "SdLx6RmdCZI"; not "NI" or "-"
+    return text if digits >= 3 or (digits and len(key) >= 6) else ""
 
 
 def number_key(text: str) -> str:
