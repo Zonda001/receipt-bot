@@ -181,10 +181,10 @@ def google_ok(log, sheet_fails=0, header=None):
             body = request.read()
             assert b'"parents": ["FOLDER"]' in body and b"JPEGDATA" in body
             return httpx.Response(200, json={"id": "F1", "webViewLink": "https://drive/F1"})
-        if path.endswith("/values/A1:L1") and request.method == "GET":
+        if path.endswith("/values/A1:N1") and request.method == "GET":
             return httpx.Response(200, json={"values": header} if header else {})
-        if "/values/" in path and path.endswith(":L1") and request.method == "PUT":
-            if path.endswith("/J1:L1"):  # an older sheet gets only the new names
+        if "/values/" in path and path.endswith(":N1") and request.method == "PUT":
+            if path.endswith("/J1:N1"):  # an older sheet gets only the new names
                 assert json.loads(request.read())["values"] == [g.HEADER[9:]]
             return httpx.Response(200, json={})
         if path.endswith("/values/A1:append"):
@@ -213,7 +213,7 @@ def test_receipt_goes_to_drive_then_sheets(files):
     asyncio.run(scenario())
     order = [p for _, p in log]
     assert order.index("/upload/drive/v3/files") < order.index("/v4/spreadsheets/SHEET/values/A1:append")
-    assert ("PUT", "/v4/spreadsheets/SHEET/values/A1:L1") in log  # empty sheet -> header
+    assert ("PUT", "/v4/spreadsheets/SHEET/values/A1:N1") in log  # empty sheet -> header
 
 
 def test_header_is_not_rewritten(files):
@@ -235,7 +235,7 @@ def test_an_older_sheet_gets_only_the_new_columns(files):
             b"JPEGDATA", "image/jpeg", "r.jpg", ROW)
 
     asyncio.run(scenario())
-    assert [p for m, p in log if m == "PUT"] == ["/v4/spreadsheets/SHEET/values/J1:L1"]
+    assert [p for m, p in log if m == "PUT"] == ["/v4/spreadsheets/SHEET/values/J1:N1"]
 
 
 @pytest.mark.parametrize("status", [400, 403, 404])
@@ -310,7 +310,7 @@ def unsure_append(log, row_there=None, lookup_fails=False):
             return httpx.Response(200, json={"access_token": "owner", "expires_in": 3600})
         if path == "/upload/drive/v3/files":
             return httpx.Response(200, json={"id": "F1", "webViewLink": "https://drive/F1"})
-        if path.endswith("/values/A1:L1"):
+        if path.endswith("/values/A1:N1"):
             return httpx.Response(200, json={"values": [g.HEADER]})
         if path.endswith("/values/A1:append"):
             raise httpx.ReadTimeout("slow")  # Google may have saved it, but the reply got lost
@@ -379,7 +379,7 @@ def test_unreachable_sheets_removes_the_photo(files):
     log = []
 
     def handler(request):
-        if request.url.path.endswith("/values/A1:L1") or request.url.path.endswith(":append"):
+        if request.url.path.endswith("/values/A1:N1") or request.url.path.endswith(":append"):
             raise httpx.ConnectError("sheets.googleapis.com: no such host")
         return unsure_append(log)(request)
 
@@ -419,7 +419,7 @@ def upload_times_out(log, found):
             raise httpx.ReadTimeout("Drive made the file, the answer got lost")
         if path == "/drive/v3/files" and request.method == "GET":
             return httpx.Response(200, json={"files": found})
-        if path.endswith("/values/A1:L1"):
+        if path.endswith("/values/A1:N1"):
             return httpx.Response(200, json={"values": [g.HEADER]})
         if path.endswith("/values/A1:append"):
             assert json.loads(request.read())["values"][0][6] == "https://drive/F9"
@@ -467,7 +467,7 @@ def test_upload_lookup_escapes_the_name(files):
     assert "name = 'it\\'s.jpg'" in next(q for _, p, q in log if p == "/drive/v3/files")
 
 
-HEADER_PATH = "/v4/spreadsheets/SHEET/values/A1:L1"
+HEADER_PATH = "/v4/spreadsheets/SHEET/values/A1:N1"
 
 
 def ping_handler(log, drive=None, sheets=None, header=None):

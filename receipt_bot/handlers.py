@@ -32,7 +32,7 @@ from receipt_bot.google_api import (
 )
 from receipt_bot.recognition import (
     RATE_LIMIT_WAIT_MAX, NotAnImage, RateLimited, Recognition, RecognitionError, RecognizerChain, clean_text,
-    fingerprint, parse_manual, same_photo, to_amount, validate_image,
+    fingerprint, number_key, parse_manual, same_photo, to_amount, validate_image,
 )
 from receipt_bot.storage import Users
 
@@ -259,6 +259,11 @@ def confidence(rec: Recognition, pick: int, manual: bool) -> tuple[int | None, s
         score, why = score - 20, why + ["валюту не видно"]
     if rec.receipt_date is None:
         score, why = score - 10, why + ["нема дати"]
+    if not rec.merchant:  # every real one among 22 had it; "100500 грошей, затверджено!" didn't
+        score, why = score - 40, why + ["нема продавця"]
+    if not rec.receipt_number:  # a ФОП's "Рахунок" may have none
+        score, why = score - 10, why + ["нема номера чека"]
+    score = max(score, 0)
     level = "висока" if score >= 90 else "середня" if score >= 60 else "низька"
     return score, f"{level}: {', '.join(why)}" if why else level
 
@@ -276,10 +281,11 @@ def _added(row: list) -> datetime | None:
 
 def duplicate_of(rows: list[list], amount: Decimal, rec: Recognition, photo_print: str,
                  now: datetime) -> tuple[str, list] | None:
-    """("photo" | "similar", the latest such row) or None. Photo: the same picture sent again.
-    Similar: same amount, currency and receipt date (two friends shooting one bar bill)."""
-    photo = similar = None
+    """("photo" | "number" | "similar", the latest such row) or None. Photo: the same picture sent again.
+    Number: same receipt number and amount. Similar: same amount, currency and date (two friends, one bar bill)."""
+    photo = numbered = similar = None
     day = rec.receipt_date.isoformat() if rec.receipt_date else ""
+    key = number_key(rec.receipt_number) if rec.receipt_number else ""
     for row in rows:
         if not isinstance(row, list):
             continue
@@ -287,14 +293,17 @@ def duplicate_of(rows: list[list], amount: Decimal, rec: Recognition, photo_prin
             photo = row
         if to_amount(_cell(row, 4) or None) != amount or _cell(row, 5).upper() != rec.currency:
             continue
+        if key and number_key(_cell(row, 13)) == key:
+            numbered = row
         if day and _cell(row, 1):
             if _cell(row, 1) == day:
                 similar = row
         elif (added := _added(row)) and now - added <= timedelta(days=UNDATED_DUPLICATE_DAYS):
             similar = row
-    if photo is not None:
-        return "photo", photo
-    return ("similar", similar) if similar is not None else None
+    for kind, found in (("photo", photo), ("number", numbered), ("similar", similar)):
+        if found is not None:
+            return kind, found
+    return None
 
 
 def duplicate_view(rid: str, item: Pending, kind: str, row: list) -> tuple[str, InlineKeyboardMarkup]:
@@ -305,6 +314,9 @@ def duplicate_view(rid: str, item: Pending, kind: str, row: list) -> tuple[str, 
     found = fmt(sum_there, _cell(row, 5)[:8]) if sum_there else f"{_cell(row, 4)[:20]} {_cell(row, 5)[:8]}".strip()
     if kind == "photo":
         text = f"⚠️ Це фото вже є в таблиці: {found}, додав {who} ({when}ID {_cell(row, 8)[:16]})."
+    elif kind == "number":
+        text = (f"⚠️ Чек № {_cell(row, 13)[:40]} на {found} уже є в таблиці, "
+                f"додав {who} ({when}ID {_cell(row, 8)[:16]}).")
     else:
         dated = f", чек від {_cell(row, 1)[:10]}" if _cell(row, 1) else ""
         text = (f"⚠️ Схожий чек уже є в таблиці: {found}{dated}, додав {who} ({when}ID {_cell(row, 8)[:16]}).\n"
@@ -661,7 +673,8 @@ async def save(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: bool,
         row = ReceiptRow(receipt_id=rid, added_at=now.strftime("%Y-%m-%d %H:%M"),
                          receipt_date=rec.receipt_date.isoformat() if rec.receipt_date else "",
                          sender=item.sender, email=email, amount=float(amount), currency=rec.currency, manual=manual,
-                         score=score, level=level, photo_print=item.photo_print)
+                         score=score, level=level, photo_print=item.photo_print, merchant=rec.merchant,
+                         receipt_number=rec.receipt_number)
         name = f"{now:%Y-%m-%d %H-%M} {amount} {rec.currency} {rid}.{EXTENSIONS.get(item.mime, 'jpg')}"
         return await google.save_receipt(photo, item.mime, name, row)
     except NotSaved:

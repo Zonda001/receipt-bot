@@ -68,6 +68,11 @@ SYSTEM_PROMPT = (
     "candidates = every amount that could plausibly be the total, including the total itself, with its label exactly "
     "as printed; at most 8, only total/sum/payment/fee lines, never individual items. "
     "date = document date as YYYY-MM-DD if printed, else null. "
+    "merchant = who issued the document as printed: shop, company, ФОП or bank (e.g. 'ТОВ \"Аргон\"', "
+    "'ПриватБанк', 'BATONI RESTAURANT LLC'); null if no issuer is printed. "
+    "receipt_number = this document's own number as printed: 'ЧЕК №', 'Квитанція №', 'Код документа', 'Receipt No', "
+    "invoice number; if there is none, the card approval code or RRN. Never the shop's register numbers "
+    "(ФН, ЗН, ПН, ІД, МАС): they are the same on every receipt of that shop. null if none. "
     "country = ISO 3166 alpha-2 code of the shop's country (from the address, city or phone code), null if unknown. "
     "currency = ISO 4217 code of the currency the amounts are in (грн/₴ -> UAH, zł -> PLN, Dhs/AED/د.إ -> AED; "
     "the 2025 dirham sign, a D with two horizontal strokes, is AED, not $). "
@@ -81,7 +86,7 @@ SYSTEM_PROMPT = (
 RESPONSE_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["candidates", "total", "country", "currency", "date", "is_receipt"],
+    "required": ["candidates", "total", "country", "currency", "date", "merchant", "receipt_number", "is_receipt"],
     "properties": {
         "candidates": {
             "type": "array",
@@ -96,6 +101,8 @@ RESPONSE_SCHEMA = {
         "country": {"type": ["string", "null"]},
         "currency": {"type": ["string", "null"]},
         "date": {"type": ["string", "null"]},
+        "merchant": {"type": ["string", "null"]},
+        "receipt_number": {"type": ["string", "null"]},
         "is_receipt": {"type": "boolean"},
     },
 }
@@ -151,6 +158,8 @@ class _ModelAnswer(BaseModel):
     currency: str | None
     date: str | None
     country: str | None = None
+    merchant: str | None = None
+    receipt_number: str | None = None
     candidates: list[_Candidate]
 
 
@@ -179,6 +188,8 @@ class Recognition:
     currency: str = "UAH"
     receipt_date: date | None = None
     currency_source: str = "model"  # model | country (USD swapped for the local one) | unknown (UAH by default)
+    merchant: str = ""
+    receipt_number: str = ""  # "" if not printed or doesn't look like a number
 
     @property
     def total(self) -> Decimal | None:
@@ -293,6 +304,17 @@ def with_fee(total: Decimal, total_label: str, rows: list[tuple[str, Decimal]]) 
     return gross if gross < MAX_AMOUNT else None
 
 
+def receipt_number(text: str | None) -> str:
+    """As printed, if it looks like a number: at least 3 digits ("NI", "-" and the like are not)."""
+    text = clean_text(text or "")[:40]
+    return text if sum(ch.isdigit() for ch in text) >= 3 else ""
+
+
+def number_key(text: str) -> str:
+    """For comparing: "ЧЕК № 5940030" and "5940030" are the same receipt."""
+    return "".join(ch for ch in text.upper() if ch.isalnum()).removeprefix("ЧЕК").removeprefix("N")
+
+
 def normalize(answer: _ModelAnswer) -> Recognition:
     """Model answer -> Recognition: drops unrealistic amounts, VAT/change, duplicates."""
     if not answer.is_receipt:
@@ -345,6 +367,8 @@ def normalize(answer: _ModelAnswer) -> Recognition:
         currency=currency,
         receipt_date=_parse_date(answer.date),
         currency_source=source,
+        merchant=clean_text(answer.merchant or "")[:60],
+        receipt_number=receipt_number(answer.receipt_number),
     )
 
 

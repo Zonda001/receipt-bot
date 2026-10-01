@@ -25,7 +25,7 @@ SA_SCOPES = ["https://www.googleapis.com/auth/drive.metadata.readonly",
 EDIT_ROLES = {"owner", "writer", "organizer", "fileOrganizer"}
 PERMISSIONS_TTL = 60  # an album of 10 photos -> one permissions call, not ten
 HEADER = ["Додано", "Дата чека", "Відправник", "Email", "Сума", "Валюта", "Фото", "Сума вручну", "ID",
-          "Впевненість", "Рівень", "Відбиток фото"]
+          "Впевненість", "Рівень", "Відбиток фото", "Продавець", "Номер чека"]
 LAST_COLUMN = chr(ord("A") + len(HEADER) - 1)
 HEADER_RANGE = f"A1:{LAST_COLUMN}1"
 ID_COLUMN = "I:I"
@@ -81,11 +81,14 @@ class ReceiptRow:
     score: int | None = None  # None: typed by a person, nothing to score
     level: str = ""
     photo_print: str = ""
+    merchant: str = ""
+    receipt_number: str = ""
 
     def cells(self, photo_link: str) -> list:
         return [self.added_at, self.receipt_date, self.sender, self.email, self.amount, self.currency,
                 photo_link, "так" if self.manual else "", self.receipt_id,
-                "" if self.score is None else self.score, self.level, self.photo_print]
+                "" if self.score is None else self.score, self.level, self.photo_print, self.merchant,
+                self.receipt_number]
 
 
 def _client(client_file: str) -> tuple[str, str]:
