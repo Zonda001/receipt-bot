@@ -38,6 +38,9 @@ from receipt_bot.storage import Users
 
 log = logging.getLogger(__name__)
 router = Router()
+# One check-and-save at a time: otherwise the same photo confirmed twice in a second reads the sheet before
+# either row lands, and both get saved (review 01.10). A save is ~3 s, people confirm one receipt at a time.
+_SAVING = asyncio.Lock()
 # Private chats only: in a group everyone sees the /login code, and anyone could redeem it with their account.
 router.message.filter(F.chat.type == "private")
 router.callback_query.filter(F.message.chat.type == "private")
@@ -102,6 +105,7 @@ class Pending:
     pick: int = 0            # which candidate was confirmed: the confidence column depends on it
     chosen: tuple[Decimal, bool] | None = None  # (amount, manual) waiting behind a duplicate warning
     dup: str = ""            # ID of the row it looks like, once "save anyway" is on offer: goes into the sheet
+    dup_unchecked: bool = False  # the sheet didn't answer the duplicate check: saved anyway, but marked
 
 
 class PendingStore:
@@ -637,14 +641,16 @@ async def reply(bot: Bot, item: Pending, text: str) -> None:
 async def confirm(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: bool,
                   users: Users, google: GoogleStore, saves: SaveLimit) -> None:
     """finalize, unless the sheet already has this receipt: then a warning and "save anyway"."""
-    try:
-        found = duplicate_of(await google.rows(), amount, item.recognition, item.photo_print,
-                             now_local().replace(tzinfo=None))
-    except GoogleError as e:  # a warning isn't worth a lost receipt: saving checks Google again anyway
-        log.warning("receipt %s: duplicate check skipped: %s", rid, e)
-        found = None
-    if found is None:
-        return await finalize(bot, rid, item, amount, manual, users, google, saves)
+    item.chosen, item.dup, item.dup_unchecked = None, "", False  # a new amount: the old warning no longer applies
+    async with _SAVING:
+        try:
+            found = duplicate_of(await google.rows(), amount, item.recognition, item.photo_print,
+                                 now_local().replace(tzinfo=None))
+        except GoogleError as e:  # don't lose a real receipt over a failed check, but don't hide it either
+            log.warning("receipt %s: duplicate check skipped: %s", rid, e)
+            found, item.dup_unchecked = None, True
+        if found is None:
+            return await finalize(bot, rid, item, amount, manual, users, google, saves)
     log.info("receipt %s: looks like a %s duplicate", rid, found[0])
     kind, row = found
     item.chosen, item.dup = (None, "") if kind == "photo" else ((amount, manual), _cell(row, 8)[:16] or "?")
@@ -658,6 +664,8 @@ async def finalize(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: b
     shown = fmt(amount, item.recognition.currency) + (" (введено вручну)" if manual else "")
     if item.dup:  # the warning message is about to be replaced: say here that it was saved over one
         shown += f" — попри попередження про дубль (ID {item.dup})"
+    elif item.dup_unchecked:
+        shown += " — дублі не перевірено: таблиця не відповіла"
     try:
         link = await save(bot, rid, item, amount, manual, users, google, saves)
     except NotSaved as e:
@@ -692,8 +700,8 @@ async def save(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: bool,
         now = now_local()
         rec = item.recognition
         score, level = confidence(rec, item.pick, manual, amount)
-        if item.dup:  # saved over a warning: the accountant filters by "дубль"
-            level += f"{', ' if ':' in level else ': '}дубль {item.dup}"
+        if item.dup or item.dup_unchecked:  # saved over a warning or unchecked: the accountant filters by "дубль"
+            level += f"{', ' if ':' in level else ': '}дубль {item.dup or 'не перевірено'}"
         row = ReceiptRow(receipt_id=rid, added_at=now.strftime("%Y-%m-%d %H:%M"),
                          receipt_date=rec.receipt_date.isoformat() if rec.receipt_date else "",
                          sender=item.sender, email=email, amount=float(amount), currency=rec.currency, manual=manual,
@@ -771,7 +779,8 @@ async def on_action(query: CallbackQuery, callback_data: ReceiptAction, bot: Bot
         with suppress(TelegramAPIError):
             await query.answer()
         await edit_receipt(bot, item, f"Сума: {fmt(amount, item.recognition.currency)} — записую…")
-        await finalize(bot, rid, item, amount, manual, users, google, saves)
+        async with _SAVING:  # a confirm of the same photo running now must see this row once it's written
+            await finalize(bot, rid, item, amount, manual, users, google, saves)
     elif callback_data.action == "manual":
         await release_manual(bot, state, pending, new_rid=rid)
         with suppress(TelegramAPIError):

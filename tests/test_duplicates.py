@@ -190,7 +190,7 @@ def test_old_short_and_broken_rows_are_skipped():
 
 # --- the flow ---
 
-def flow(rows_or_error, photo=""):
+def flow(rows_or_error, photo="", stale=False):
     """One pending receipt; tap "ok" -> (edits, saved)."""
     edits, saved = [], []
 
@@ -214,6 +214,8 @@ def flow(rows_or_error, photo=""):
                                       photo_print=photo))
             google = SimpleNamespace(rows=rows)
             item = pending.get(rid)
+            if stale:  # left over from an earlier warning on this receipt
+                item.chosen, item.dup = (Decimal("1.00"), True), "old1"
             item.status = "processing"
             await handlers.confirm(None, rid, item, Decimal("126.00"), False, None, google, None)
             return item, rid
@@ -248,9 +250,46 @@ def test_no_duplicate_saves_right_away():
     assert saved == [(Decimal("126.00"), False)] and edits == []
 
 
-def test_a_failed_lookup_does_not_block_saving():
-    _, _, _, saved = flow(GoogleUnsure("sheet rows: ReadTimeout"))
-    assert saved == [(Decimal("126.00"), False)]
+def test_a_failed_lookup_does_not_block_saving_but_is_marked():
+    item, _, _, saved = flow(GoogleUnsure("sheet rows: ReadTimeout"))
+    assert saved == [(Decimal("126.00"), False)] and item.dup_unchecked
+
+
+def test_a_new_amount_drops_the_old_warning():
+    # review 01.10: warning -> manual -> another amount with no duplicate still said "дубль old1"
+    item, _, _, saved = flow([row(day="2026-09-29")], stale=True)
+    assert saved and item.dup == "" and item.chosen is None
+
+
+def test_the_same_photo_confirmed_twice_at_once_is_caught(monkeypatch):
+    # review 01.10: both read the sheet before either row landed, both got saved
+    p = photo_print(receipt_jpeg(["TOTAL 126.00 AED"]))
+    sheet, saved, edits = [], [], []
+
+    async def rows():
+        return list(sheet)
+
+    async def slow_finalize(bot, rid, item, amount, manual, *rest):
+        await asyncio.sleep(0.05)  # Drive upload
+        sheet.append(row(print_=item.photo_print, rid=rid))
+        saved.append(rid)
+
+    async def edit(bot, item, text, markup=None):
+        edits.append(text)
+
+    monkeypatch.setattr(handlers, "finalize", slow_finalize)
+    monkeypatch.setattr(handlers, "edit_receipt", edit)
+    monkeypatch.setattr(handlers, "_SAVING", asyncio.Lock())  # a fresh one, restored after the test
+
+    async def scenario():
+        google = SimpleNamespace(rows=rows)
+        items = [Pending(user_id=1, file_id="f", recognition=AED, created=0.0, chat_id=1, msg_id=1, photo_print=p)
+                 for _ in range(2)]
+        await asyncio.gather(*(handlers.confirm(None, f"r{i}", it, Decimal("126.00"), False, None, google, None)
+                               for i, it in enumerate(items)))
+
+    asyncio.run(scenario())
+    assert len(saved) == 1 and any("Вдруге не записую" in text for text in edits)
 
 
 def test_save_anyway_saves_what_was_chosen(monkeypatch):
@@ -416,3 +455,35 @@ def test_back_from_a_warning_forgets_the_duplicate(monkeypatch):
     query = SimpleNamespace(from_user=SimpleNamespace(id=1), answer=answer)
     asyncio.run(handlers.on_action(query, ReceiptAction(rid=rid, action="back"), None, state, pending, None, None, None))
     assert pending.get(rid).chosen is None and pending.get(rid).dup == ""
+
+
+def test_an_unchecked_save_is_marked_in_the_sheet():
+    from receipt_bot.handlers import SaveLimit, save
+
+    rows = []
+
+    class Google:
+        async def has_access(self, email):
+            return True
+
+        async def ping(self):
+            pass
+
+        async def save_receipt(self, photo, mime, name, row):
+            rows.append(row)
+            return "link"
+
+    class Bot:
+        async def download(self, file_id):
+            return io.BytesIO(receipt_jpeg(["TOTAL 126.00"]))
+
+    class Users:
+        def email(self, user_id):
+            return "a@x"
+
+        def via_domain(self, user_id):
+            return False
+
+    item = Pending(user_id=1, file_id="f", recognition=AED, created=0.0, chat_id=1, msg_id=1, dup_unchecked=True)
+    asyncio.run(save(Bot(), "rid", item, Decimal("126.00"), False, Users(), Google(), SaveLimit(5, 10**9)))
+    assert rows[0].level == "висока: дубль не перевірено"
