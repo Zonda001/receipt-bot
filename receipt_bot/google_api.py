@@ -24,8 +24,10 @@ SA_SCOPES = ["https://www.googleapis.com/auth/drive.metadata.readonly",
              "https://www.googleapis.com/auth/spreadsheets"]
 EDIT_ROLES = {"owner", "writer", "organizer", "fileOrganizer"}
 PERMISSIONS_TTL = 60  # an album of 10 photos -> one permissions call, not ten
-HEADER = ["Додано", "Дата чека", "Відправник", "Email", "Сума", "Валюта", "Фото", "Сума вручну", "ID"]
-HEADER_RANGE = "A1:I1"
+HEADER = ["Додано", "Дата чека", "Відправник", "Email", "Сума", "Валюта", "Фото", "Сума вручну", "ID",
+          "Впевненість", "Рівень", "Відбиток фото"]
+LAST_COLUMN = chr(ord("A") + len(HEADER) - 1)
+HEADER_RANGE = f"A1:{LAST_COLUMN}1"
 ID_COLUMN = "I:I"
 
 
@@ -76,10 +78,14 @@ class ReceiptRow:
     amount: float
     currency: str
     manual: bool
+    score: int | None = None  # None: typed by a person, nothing to score
+    level: str = ""
+    photo_print: str = ""
 
     def cells(self, photo_link: str) -> list:
         return [self.added_at, self.receipt_date, self.sender, self.email, self.amount, self.currency,
-                photo_link, "так" if self.manual else "", self.receipt_id]
+                photo_link, "так" if self.manual else "", self.receipt_id,
+                "" if self.score is None else self.score, self.level, self.photo_print]
 
 
 def _client(client_file: str) -> tuple[str, str]:
@@ -345,10 +351,21 @@ class GoogleStore:
         headers = await self._sa_headers()
         r = await _call(self._http, "sheet header", "GET", f"{SHEETS_URL}/{self._sheet_id}/values/{HEADER_RANGE}",
                         headers=headers)
-        if not _json(r, "sheet header").get("values"):
-            await _call(self._http, "sheet header", "PUT", f"{SHEETS_URL}/{self._sheet_id}/values/{HEADER_RANGE}",
-                        params={"valueInputOption": "RAW"}, json={"values": [HEADER]}, headers=headers)
+        present = len((_json(r, "sheet header").get("values") or [[]])[0])
+        if present < len(HEADER):
+            # An empty sheet gets the whole header, an older one only the new columns: renamed ones stay as they are.
+            start = chr(ord("A") + present)
+            await _call(self._http, "sheet header", "PUT",
+                        f"{SHEETS_URL}/{self._sheet_id}/values/{start}1:{LAST_COLUMN}1",
+                        params={"valueInputOption": "RAW"}, json={"values": [HEADER[present:]]}, headers=headers)
         self._header_ok = True
+
+    async def rows(self) -> list[list]:
+        """Every receipt row (no header), as the cells are: numbers as numbers. For the duplicate check."""
+        r = await _call(self._http, "sheet rows", "GET", f"{SHEETS_URL}/{self._sheet_id}/values/A2:{LAST_COLUMN}",
+                        params={"valueRenderOption": "UNFORMATTED_VALUE"}, headers=await self._sa_headers())
+        values = _json(r, "sheet rows").get("values", [])
+        return values if isinstance(values, list) else []
 
     async def _append(self, cells: list) -> None:
         await self._ensure_header()  # the bot already did it in ping(); a no-op then

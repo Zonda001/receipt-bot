@@ -10,7 +10,7 @@ import time
 from collections import defaultdict, deque
 from contextlib import suppress
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -32,7 +32,7 @@ from receipt_bot.google_api import (
 )
 from receipt_bot.recognition import (
     RATE_LIMIT_WAIT_MAX, NotAnImage, RateLimited, Recognition, RecognitionError, RecognizerChain, clean_text,
-    parse_manual, validate_image,
+    fingerprint, parse_manual, same_photo, to_amount, validate_image,
 )
 from receipt_bot.storage import Users
 
@@ -50,6 +50,7 @@ LOGINS_GLOBAL_PER_MINUTE = 20
 REPLIES_PER_MINUTE = 10
 SAVES_PER_DAY = 100
 SAVE_BYTES_PER_DAY = 200 * 1024 * 1024  # ~20 full-size files or ~1000 phone photos a day per Google account
+UNDATED_DUPLICATE_DAYS = 2  # no date on one of the two receipts: same amount added this recently still counts
 IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
 
@@ -76,7 +77,7 @@ except ZoneInfoNotFoundError:  # Windows without tzdata: tests only
 
 class ReceiptAction(CallbackData, prefix="r"):
     rid: str
-    action: str  # ok | manual | back | cancel
+    action: str  # ok | manual | back | cancel | force (save despite a likely duplicate)
     idx: int = 0
 
 
@@ -97,6 +98,9 @@ class Pending:
     mime: str = "image/jpeg"
     size: int = 0       # bytes as Telegram reports them; 0 if it didn't
     status: str = "pending"  # pending -> processing -> done | cancelled
+    photo_print: str = ""    # for the duplicate check; "" if the photo didn't open
+    pick: int = 0            # which candidate was confirmed: the confidence column depends on it
+    chosen: tuple[Decimal, bool] | None = None  # (amount, manual) waiting behind a duplicate warning
 
 
 class PendingStore:
@@ -238,6 +242,80 @@ def manual_view(rid: str, rec: Recognition) -> tuple[str, InlineKeyboardMarkup]:
     kb.adjust(2)
     return (f"Введи суму для цього чека числом ({currency_name(rec.currency)}), наприклад 123.45\n"
             f"Якщо валюта інша, допиши її код: 126 AED", kb.as_markup())
+
+
+def confidence(rec: Recognition, pick: int, manual: bool) -> tuple[int | None, str]:
+    """Score 0-100 and a word with the reasons, from our own checks: the model's self-assessment isn't calibrated."""
+    if manual:
+        return None, "вручну"
+    score, why = 100, []
+    if not rec.has_total:
+        score, why = score - 40, why + ["модель не певна підсумку"]
+    elif pick != 0:
+        score, why = score - 30, why + ["обрано іншу суму"]
+    if rec.currency_source == "country":
+        score, why = score - 20, why + ["валюта за країною"]
+    elif rec.currency_source == "unknown":
+        score, why = score - 20, why + ["валюту не видно"]
+    if rec.receipt_date is None:
+        score, why = score - 10, why + ["нема дати"]
+    level = "висока" if score >= 90 else "середня" if score >= 60 else "низька"
+    return score, f"{level}: {', '.join(why)}" if why else level
+
+
+def _cell(row: list, i: int) -> str:
+    return clean_text(str(row[i])) if i < len(row) else ""  # sheet cells: anyone with edit types there
+
+
+def _added(row: list) -> datetime | None:
+    try:
+        return datetime.strptime(_cell(row, 0), "%Y-%m-%d %H:%M")
+    except ValueError:
+        return None
+
+
+def duplicate_of(rows: list[list], amount: Decimal, rec: Recognition, photo_print: str,
+                 now: datetime) -> tuple[str, list] | None:
+    """("photo" | "similar", the latest such row) or None. Photo: the same picture sent again.
+    Similar: same amount, currency and receipt date (two friends shooting one bar bill)."""
+    photo = similar = None
+    day = rec.receipt_date.isoformat() if rec.receipt_date else ""
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        if photo_print and same_photo(photo_print, _cell(row, 11)):
+            photo = row
+        if to_amount(_cell(row, 4) or None) != amount or _cell(row, 5).upper() != rec.currency:
+            continue
+        if day and _cell(row, 1):
+            if _cell(row, 1) == day:
+                similar = row
+        elif (added := _added(row)) and now - added <= timedelta(days=UNDATED_DUPLICATE_DAYS):
+            similar = row
+    if photo is not None:
+        return "photo", photo
+    return ("similar", similar) if similar is not None else None
+
+
+def duplicate_view(rid: str, item: Pending, kind: str, row: list) -> tuple[str, InlineKeyboardMarkup]:
+    amount, _ = item.chosen
+    who = clean_text(_cell(row, 2).split(" (")[0])[:40] or "хтось"
+    when = f"{_cell(row, 0)[:16]}, " if _cell(row, 0) else ""
+    sum_there = to_amount(_cell(row, 4) or None)
+    found = fmt(sum_there, _cell(row, 5)[:8]) if sum_there else f"{_cell(row, 4)[:20]} {_cell(row, 5)[:8]}".strip()
+    if kind == "photo":
+        text = f"⚠️ Це фото вже є в таблиці: {found}, додав {who} ({when}ID {_cell(row, 8)[:16]})."
+    else:
+        dated = f", чек від {_cell(row, 1)[:10]}" if _cell(row, 1) else ""
+        text = (f"⚠️ Схожий чек уже є в таблиці: {found}{dated}, додав {who} ({when}ID {_cell(row, 8)[:16]}).\n"
+                "Якщо це інший чек, записуй.")
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"✅ Все одно записати {fmt(amount, item.recognition.currency)}",
+              callback_data=ReceiptAction(rid=rid, action="force"))
+    kb.button(text="↩️ Назад", callback_data=ReceiptAction(rid=rid, action="back"))
+    kb.button(text="✖️ Скасувати", callback_data=ReceiptAction(rid=rid, action="cancel"))
+    kb.adjust(1)
+    return text, kb.as_markup()
 
 
 async def access_problem(user_id: int, users: Users, google: GoogleStore) -> str | None:
@@ -463,11 +541,13 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, recognizer: Re
         await status.edit_text("Не вдалося отримати фото з Telegram. Надішли його ще раз.")
         return
 
+    with image:
+        data = image.read()
     rec: Recognition | None = None
     note = ""  # non-empty: recognition failed, offer manual entry
     try:
         if quota.take(email):
-            rec = await recognizer.recognize(image)
+            rec = await recognizer.recognize(data)
         else:
             note = "Ліміт автоматичного розпізнавання на сьогодні вичерпано — суму можна ввести вручну."
     except NotAnImage:
@@ -497,7 +577,8 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, recognizer: Re
     mime = message.document.mime_type if message.document else "image/jpeg"
     item = Pending(user_id=user_id, file_id=file.file_id, recognition=rec, created=time.time(),
                    chat_id=status.chat.id, msg_id=status.message_id, note=note,
-                   sender=display_name(message.from_user), mime=mime, size=file.file_size or 0)
+                   sender=display_name(message.from_user), mime=mime, size=file.file_size or 0,
+                   photo_print=await fingerprint(data))
     rid = pending.add(item)
     await edit_receipt(bot, item, *result_view(rid, rec, note))
 
@@ -520,6 +601,23 @@ async def reply(bot: Bot, item: Pending, text: str) -> None:
     with suppress(TelegramAPIError):
         await bot.send_message(item.chat_id, text, reply_parameters=ReplyParameters(
             message_id=item.msg_id, allow_sending_without_reply=True))
+
+
+async def confirm(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: bool,
+                  users: Users, google: GoogleStore, saves: SaveLimit) -> None:
+    """finalize, unless the sheet already has this receipt: then a warning and "save anyway"."""
+    try:
+        found = duplicate_of(await google.rows(), amount, item.recognition, item.photo_print,
+                             now_local().replace(tzinfo=None))
+    except GoogleError as e:  # a warning isn't worth a lost receipt: saving checks Google again anyway
+        log.warning("receipt %s: duplicate check skipped: %s", rid, e)
+        found = None
+    if found is None:
+        return await finalize(bot, rid, item, amount, manual, users, google, saves)
+    log.info("receipt %s: looks like a %s duplicate", rid, found[0])
+    item.chosen = (amount, manual)
+    item.status = "pending"
+    await edit_receipt(bot, item, *duplicate_view(rid, item, *found))
 
 
 async def finalize(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: bool,
@@ -559,9 +657,11 @@ async def save(bot: Bot, rid: str, item: Pending, amount: Decimal, manual: bool,
         await validate_image(photo)  # only a real photo goes to Drive, even if recognition was skipped
         now = now_local()
         rec = item.recognition
+        score, level = confidence(rec, item.pick, manual)
         row = ReceiptRow(receipt_id=rid, added_at=now.strftime("%Y-%m-%d %H:%M"),
                          receipt_date=rec.receipt_date.isoformat() if rec.receipt_date else "",
-                         sender=item.sender, email=email, amount=float(amount), currency=rec.currency, manual=manual)
+                         sender=item.sender, email=email, amount=float(amount), currency=rec.currency, manual=manual,
+                         score=score, level=level, photo_print=item.photo_print)
         name = f"{now:%Y-%m-%d %H-%M} {amount} {rec.currency} {rid}.{EXTENSIONS.get(item.mime, 'jpg')}"
         return await google.save_receipt(photo, item.mime, name, row)
     except NotSaved:
@@ -617,12 +717,24 @@ async def on_action(query: CallbackQuery, callback_data: ReceiptAction, bot: Bot
             return
         amount = item.recognition.candidates[callback_data.idx].amount
         item.status = "processing"  # right away, before the first await: aiogram handles taps concurrently
+        item.pick = callback_data.idx
         if (await state.get_data()).get("rid") == rid:
             await state.clear()  # the amount was picked with a button: stop waiting for manual entry on this receipt
         with suppress(TelegramAPIError):
             await query.answer()
         await edit_receipt(bot, item, f"Сума: {fmt(amount, item.recognition.currency)} — записую…")
-        await finalize(bot, rid, item, amount, False, users, google, saves)
+        await confirm(bot, rid, item, amount, False, users, google, saves)
+    elif callback_data.action == "force":
+        if item.chosen is None:
+            with suppress(TelegramAPIError):
+                await query.answer()
+            return
+        item.status = "processing"
+        amount, manual = item.chosen
+        with suppress(TelegramAPIError):
+            await query.answer()
+        await edit_receipt(bot, item, f"Сума: {fmt(amount, item.recognition.currency)} — записую…")
+        await finalize(bot, rid, item, amount, manual, users, google, saves)
     elif callback_data.action == "manual":
         await release_manual(bot, state, pending, new_rid=rid)
         with suppress(TelegramAPIError):
@@ -630,6 +742,7 @@ async def on_action(query: CallbackQuery, callback_data: ReceiptAction, bot: Bot
         if item.status == "pending":  # while we waited for Telegram, the receipt may have been confirmed or cancelled
             await edit_receipt(bot, item, *manual_view(rid, item.recognition))
     elif callback_data.action == "back":
+        item.chosen = None
         if (await state.get_data()).get("rid") == rid:
             await state.clear()
         with suppress(TelegramAPIError):
@@ -672,7 +785,7 @@ async def on_manual_amount(message: Message, bot: Bot, state: FSMContext, pendin
     await state.clear()
     log.info("receipt %s: manual amount", rid)
     await edit_receipt(bot, item, f"Сума: {fmt(amount, item.recognition.currency)} (введено вручну) — записую…")
-    await finalize(bot, rid, item, amount, True, users, google, saves)
+    await confirm(bot, rid, item, amount, True, users, google, saves)
 
 
 @router.message()

@@ -178,6 +178,7 @@ class Recognition:
     has_total: bool = False
     currency: str = "UAH"
     receipt_date: date | None = None
+    currency_source: str = "model"  # model | country (USD swapped for the local one) | unknown (UAH by default)
 
     @property
     def total(self) -> Decimal | None:
@@ -331,14 +332,19 @@ def normalize(answer: _ModelAnswer) -> Recognition:
 
     currency = (answer.currency or "").strip().upper()
     country = (answer.country or "").strip().upper()
+    source = "model"
     if currency == "USD" and country in LOCAL_CURRENCY:
         currency = LOCAL_CURRENCY[country]  # a local sign read as $: Gemma sees the 2025 dirham sign so (Vadym 30.09)
+        source = "country"
+    if not re.fullmatch(r"[A-Z]{3}", currency):
+        currency, source = "UAH", "unknown"
     return Recognition(
         is_receipt=True,
         candidates=candidates,
         has_total=trusted,
-        currency=currency if re.fullmatch(r"[A-Z]{3}", currency) else "UAH",
+        currency=currency,
         receipt_date=_parse_date(answer.date),
+        currency_source=source,
     )
 
 
@@ -612,6 +618,38 @@ class RecognizerChain:
             raise soonest
         finally:
             self.in_flight -= 1
+
+
+PRINT_SIDE = 16  # 256-bit dHash: on 25 receipts a recompressed copy differs by <=10 bits, another receipt by >=43
+SAME_PHOTO_BITS = 24
+
+
+def photo_print(data: bytes) -> str:
+    """Brightness gradients of a tiny grey copy, as hex. Survives Telegram's recompression, not another shot."""
+    with Image.open(io.BytesIO(prepare_image(data))) as img:
+        small = img.convert("L").resize((PRINT_SIDE + 1, PRINT_SIDE), Image.LANCZOS).tobytes()
+    bits = 0
+    for row in range(PRINT_SIDE):
+        line = small[row * (PRINT_SIDE + 1):(row + 1) * (PRINT_SIDE + 1)]
+        for left, right in zip(line, line[1:]):
+            bits = bits << 1 | (left > right)
+    return f"{bits:0{PRINT_SIDE * PRINT_SIDE // 4}x}"
+
+
+def same_photo(a: str, b: str) -> bool:
+    try:
+        return len(a) == len(b) and (int(a, 16) ^ int(b, 16)).bit_count() <= SAME_PHOTO_BITS
+    except ValueError:  # the cell came from the sheet, where anyone can type anything
+        return False
+
+
+async def fingerprint(data: bytes) -> str:
+    """photo_print, or "" if the file doesn't open: the duplicate check then just skips the photo."""
+    try:
+        async with _IMAGE_SLOTS:
+            return await asyncio.to_thread(photo_print, data)
+    except NotAnImage:
+        return ""
 
 
 async def validate_image(data: bytes) -> None:

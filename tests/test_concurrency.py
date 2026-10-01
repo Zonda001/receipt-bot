@@ -61,10 +61,13 @@ def test_manual_amount_with_currency_overrides_the_recognized_one(monkeypatch):
         async def no_edit(*args, **kwargs):
             pass
 
+        async def no_rows():
+            return []
+
         monkeypatch.setattr(handlers, "finalize", fake_finalize)
         monkeypatch.setattr(handlers, "edit_receipt", no_edit)
         message = SimpleNamespace(text="126 AED", from_user=SimpleNamespace(id=1))
-        await handlers.on_manual_amount(message, None, state, pending, None, None, None)
+        await handlers.on_manual_amount(message, None, state, pending, None, SimpleNamespace(rows=no_rows), None)
         assert saved == [(Decimal("126.00"), "AED", True)]
 
     asyncio.run(scenario())
